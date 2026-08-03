@@ -3,13 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<!-- connect-src deliberately omits 'self': this app never calls fetch or XHR,
+     it talks to the server with JSONP script tags. Leaving 'self' in would let
+     any hostile script here read same-origin institute pages using the
+     volunteer's logged-in session.
+
+     Tighten script-src to YOUR deployment path. script.google.com is shared:
+     anyone can publish there, so allowing the whole host leaves an exfiltration
+     route (a script tag carrying stolen data in its query string). Replace
+     AKfycbXXXX below with the id from your /exec URL, then test a scan. -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
-  script-src 'self' 'unsafe-inline' https://accounts.google.com https://script.google.com https://script.googleusercontent.com;
+  script-src 'self' https://accounts.google.com https://script.google.com/macros/s/AKfycbXXXX/ https://script.googleusercontent.com;
   style-src 'self' 'unsafe-inline';
   img-src 'self' data: blob:;
   media-src 'self' blob:;
-  connect-src 'self' https://accounts.google.com;
+  connect-src https://accounts.google.com;
   frame-src https://accounts.google.com;
   base-uri 'none';
   form-action 'none';">
@@ -121,13 +130,13 @@
     <span>Gate scanner</span>
     <span style="display:flex;align-items:center;gap:8px;min-width:0">
       <span id="vol"></span>
-      <button id="signout" onclick="signOut()">Switch</button>
+      <button id="signout">Switch</button>
     </span>
   </div>
   <div class="modes" role="group" aria-label="Scan mode">
-    <button id="m-IN"    aria-pressed="true"  onclick="setMode('IN')">Entry</button>
-    <button id="m-OUT"   aria-pressed="false" onclick="setMode('OUT')">Exit</button>
-    <button id="m-CHECK" aria-pressed="false" onclick="setMode('CHECK')">Look up</button>
+    <button id="m-IN"    aria-pressed="true" >Entry</button>
+    <button id="m-OUT"   aria-pressed="false">Exit</button>
+    <button id="m-CHECK" aria-pressed="false">Look up</button>
   </div>
 </header>
 
@@ -137,15 +146,15 @@
 </main>
 
 <footer>
-  <button id="photoBtn" onclick="document.getElementById('photoIn').click()">📷 Take photo of pass (if camera above will not scan)</button>
+  <button id="photoBtn">📷 Take photo of pass (if camera above will not scan)</button>
   <input type="file" id="photoIn" accept="image/*" capture="environment"
-         style="display:none" onchange="scanPhoto(this)">
+         style="display:none">
   <div id="filereader" style="position:absolute;left:-10000px;top:0;width:320px;height:320px"></div>
   <details id="manualBox" style="display:none">
     <summary>Pass damaged? Type the Pass ID</summary>
     <div class="manual">
       <input id="manualId" placeholder="P0001" autocapitalize="characters" autocomplete="off">
-      <button onclick="sendManual()">Go</button>
+      <button id="manualGo">Go</button>
     </div>
   </details>
   <div class="err" id="err"></div>
@@ -163,7 +172,7 @@
   <p class="denied" id="signinErr"></p>
 </div>
 
-<div id="result" onclick="dismiss()">
+<div id="result">
   <div class="verdict" id="r-verdict"></div>
   <div class="headline" id="r-headline"></div>
   <div class="roll" id="r-roll"></div>
@@ -178,384 +187,6 @@
      Upload html5-qrcode.min.js and jsQR.js into this same folder. -->
 <script src="html5-qrcode.min.js"></script>
 <script src="jsQR.js"></script>
-<script>
-  /* ------------------------------------------------------------------
-     CONFIGURATION — set these two once, here in the file.
-
-     They are deliberately NOT read from the URL. An earlier version took
-     them from the query string, which meant anyone could send a link that
-     pointed this page at their own server; because the transport below
-     loads the reply as a <script>, that was remote code execution on
-     whatever domain this file is hosted on.
-     ------------------------------------------------------------------ */
-  var NONCE = '', ROLE = '';
-
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
-
-  function qs(name){
-    var m = location.search.match(new RegExp('[?&]' + name + '=([^&]+)'));
-    if (!m) return '';
-    try { return decodeURIComponent(m[1]); } catch (e) { return ''; }  // malformed % must not kill the page
-  }
-
-  var VOLKEY = qs('k').toUpperCase();
-
-  if (API_URL.indexOf('PASTE_') === 0) {
-    document.body.innerHTML =
-      '<p style="font:15px sans-serif;color:#900;padding:20px">'
-      + 'This page has not been configured. Edit index.html and set API_URL and CLIENT_ID.</p>';
-    throw new Error('unconfigured');
-  }
-
-  var MODE = 'IN';
-
-  var busy = false, lastCode = '', lastAt = 0, scanner = null;
-
-  function setMode(m){
-    MODE = m;
-    ['IN','OUT','CHECK'].forEach(function(k){
-      document.getElementById('m-'+k).setAttribute('aria-pressed', String(k===m));
-    });
-    document.getElementById('hint').textContent =
-      m==='IN' ? 'Point at the pass to admit' :
-      m==='OUT'? 'Point at the pass to check out' :
-                 'Point at the pass to view details';
-  }
-
-  function beep(ok){
-    try{
-      var a = new (window.AudioContext||window.webkitAudioContext)();
-      var o = a.createOscillator(), g = a.createGain();
-      o.connect(g); g.connect(a.destination);
-      o.frequency.value = ok ? 880 : 220;
-      g.gain.setValueAtTime(.14, a.currentTime);
-      g.gain.exponentialRampToValueAtTime(.0001, a.currentTime + (ok?.16:.42));
-      o.start(); o.stop(a.currentTime + (ok?.18:.45));
-    }catch(e){}
-  }
-
-  function show(res){
-    clearPending();
-    if (res.status === 'DENIED' && CLIENT_ID){
-      if (VOLKEY) return;        // stale rejection from before sign-in: ignore it
-      clearSession();
-      resetSignInUi();
-      document.getElementById('signinErr').textContent = res.detail || res.headline || '';
-      document.getElementById('signin').className = 'show';
-      busy = false;
-      return;
-    }
-    busy = true;
-    var ok = (res.status==='ALLOW'||res.status==='EXIT'||res.status==='INFO');
-    beep(ok);
-    if (navigator.vibrate) navigator.vibrate(ok?60:[90,70,90]);
-
-    var box = document.getElementById('result');
-    box.className = 'show bg-' + res.status;
-    document.getElementById('r-verdict').textContent =
-      ({ALLOW:'Let them in', EXIT:'Checked out', FULL:'Hold — pass is full',
-        WARN:'Check this', INFO:'Details only', INVALID:'Do not admit',
-        BLOCKED:'Do not admit', DENIED:'Access problem'})[res.status] || res.status;
-    document.getElementById('r-headline').textContent = res.headline || '';
-    document.getElementById('r-roll').textContent =
-      [res.roll, res.dept, res.passId].filter(Boolean).join('  ·  ');
-    document.getElementById('r-detail').textContent = res.detail || '';
-
-    var pips = '';
-    if (res.capacity){
-      for (var i=1;i<=res.capacity;i++) pips += '<div class="pip'+(i<=res.inside?' on':'')+'"></div>';
-    }
-    document.getElementById('r-pips').innerHTML = pips;
-
-    var act = document.getElementById('r-actions');
-    act.innerHTML = '';
-    if (res.pending){
-      [['IN','Admit'],['OUT','Check out']].forEach(function(p){
-        var b = document.createElement('button');
-        b.textContent = p[1];
-        b.onclick = function(ev){
-          ev.stopPropagation();
-          MODE = p[0];
-          busy = false;
-          send(res.pending);
-        };
-        act.appendChild(b);
-      });
-    }
-  }
-
-  var pending = false, pendingTimer = null;
-
-  function showPending(){
-    busy = true; pending = true;
-    var t0 = Date.now();
-    var box = document.getElementById('result');
-    box.className = 'show bg-INFO';
-    document.getElementById('r-verdict').textContent = 'Checking';
-    document.getElementById('r-headline').textContent = 'Please wait';
-    document.getElementById('r-roll').textContent = '';
-    document.getElementById('r-pips').innerHTML = '';
-    document.getElementById('r-actions').innerHTML = '';
-    var det = document.getElementById('r-detail');
-    det.textContent = 'Looking up the pass\u2026';
-    clearInterval(pendingTimer);
-    pendingTimer = setInterval(function(){
-      var s = Math.round((Date.now() - t0) / 1000);
-      det.textContent = s < 4 ? 'Looking up the pass\u2026'
-        : 'Still working \u2014 ' + s + 's. Do not scan again yet.';
-    }, 500);
-  }
-
-  function clearPending(){
-    pending = false;
-    clearInterval(pendingTimer);
-    pendingTimer = null;
-  }
-
-  function dismiss(){
-    if (pending) return;              // ignore taps while waiting for the server
-    document.getElementById('result').className = '';
-    busy = false;
-    if (scanner) { try { scanner.resume(); } catch(e){} }
-  }
-
-  function api(params, cb){
-    var name = 'jp' + Date.now() + Math.floor(Math.random()*1000);
-    var s = document.createElement('script');
-    var done = false;
-    var timer = setTimeout(function(){ finish({ status:'INVALID',
-      headline:'No answer from the server', detail:'Check the signal and scan again.' }); }, 15000);
-    function finish(res){
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      try { delete window[name]; } catch(e){ window[name] = undefined; }
-      if (s.parentNode) s.parentNode.removeChild(s);
-      cb(res);
-    }
-    window[name] = finish;
-    params.callback = name;
-    params.k = VOLKEY;
-    params.n = NONCE;
-    var q = Object.keys(params).map(function(key){
-      return encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
-    }).join('&');
-    s.src = API_URL + '?' + q;
-    s.onerror = function(){ finish({ status:'INVALID', headline:'Could not reach the server',
-      detail:'Check the signal and scan again.' }); };
-    document.body.appendChild(s);
-  }
-
-  function send(code){
-    if (CLIENT_ID && !VOLKEY){
-      resetSignInUi();
-      document.getElementById('signin').className = 'show';
-      return;                    // not signed in yet: don't send a doomed request
-    }
-    document.getElementById('err').textContent = '';
-    showPending();
-    api({ api:'scan', t:code, action:MODE }, show);
-  }
-
-  function sendManual(){
-    var v = document.getElementById('manualId').value;
-    if(!v) return;
-    document.getElementById('manualId').value = '';
-    api({ api:'manual', id:v, action:MODE }, show);
-  }
-
-  function onScan(text){
-    var now = Date.now();
-    if (busy) return;
-    if (text === lastCode && now - lastAt < 4000) return;
-    lastCode = text; lastAt = now;
-    if (scanner) { try { scanner.pause(true); } catch(e){} }
-    send(text);
-  }
-
-  function loadImage_(file){
-    return new Promise(function(res, rej){
-      var url = URL.createObjectURL(file);
-      var img = new Image();
-      img.onload  = function(){ URL.revokeObjectURL(url); res(img); };
-      img.onerror = function(){ URL.revokeObjectURL(url); rej(new Error('load')); };
-      img.src = url;
-    });
-  }
-
-  function tryDecode_(img, maxDim, crop){
-    var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
-    var sx = 0, sy = 0, sw = iw, sh = ih;
-    if (crop){ sw = iw * 0.55; sh = ih * 0.55; sx = (iw - sw) / 2; sy = (ih - sh) / 2; }
-    var scale = Math.min(1, maxDim / Math.max(sw, sh));
-    var w = Math.max(1, Math.round(sw * scale)), h = Math.max(1, Math.round(sh * scale));
-    var c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    var ctx = c.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
-    var d = ctx.getImageData(0, 0, w, h);
-    var r = jsQR(d.data, w, h, { inversionAttempts: 'attemptBoth' });
-    return r && r.data ? r.data : null;
-  }
-
-  var ATTEMPTS = [[1000,false],[1500,false],[700,false],[1000,true],[1600,true],[500,false]];
-
-  function scanPhoto(input){
-    var f = input.files && input.files[0];
-    if(!f) return;
-    if (typeof jsQR === 'undefined'){
-      document.getElementById('err').textContent =
-        'Decoder did not load. Check the phone has internet, then reload this page.';
-      return;
-    }
-    input.value = '';
-    var err = document.getElementById('err');
-    err.textContent = 'Reading photo\u2026';
-    loadImage_(f).then(function(img){
-      for (var i = 0; i < ATTEMPTS.length; i++){
-        var text = null;
-        try { text = tryDecode_(img, ATTEMPTS[i][0], ATTEMPTS[i][1]); } catch(e){}
-        if (text){
-          err.textContent = '';
-          lastCode = ''; busy = false;
-          send(text);
-          return;
-        }
-      }
-      var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
-      var lib = (typeof jsQR === 'undefined') ? 'DECODER MISSING' : 'decoder ok';
-      err.textContent = 'No QR found \u2014 photo ' + iw + '\u00d7' + ih + ', ' + lib
-                      + '. Get closer so the QR fills the frame.';
-    }).catch(function(){
-      err.textContent = 'Could not open that photo. Try again.';
-    });
-  }
-
-  function startCamera(){
-    scanner = new Html5Qrcode('reader', { verbose:false });
-    scanner.start(
-      { facingMode: 'environment' },
-      { fps: 12, qrbox: { width: 240, height: 240 } },
-      onScan,
-      function(){}
-    ).catch(function(){
-      document.getElementById('hint').textContent =
-        'Live camera blocked on this phone — use "Take photo of pass" below.';
-    });
-  }
-
-  var SESSION_KEY = '';
-
-  function saveSession(key, name, nonce, role){
-    SESSION_KEY = key;
-    VOLKEY = key;
-    NONCE = nonce || NONCE;
-    ROLE = role || '';
-    try {
-      sessionStorage.setItem('gatescanner_session', JSON.stringify(
-        { key: key, name: name, nonce: NONCE, role: ROLE, ts: Date.now() }));
-    } catch(e){}
-    applyRole();
-    document.getElementById('vol').textContent = name;
-    document.getElementById('signout').style.display = 'inline-block';
-  }
-
-  function clearSession(){
-    SESSION_KEY = ''; VOLKEY = ''; NONCE = ''; ROLE = '';
-    applyRole();
-    try { sessionStorage.removeItem('gatescanner_session'); } catch(e){}
-    document.getElementById('signout').style.display = 'none';
-  }
-
-  var signInReady = false;
-
-  function applyRole(){
-    var box = document.getElementById('manualBox');
-    if (box) box.style.display = (ROLE === 'SUPERVISOR') ? '' : 'none';
-  }
-
-  function resetSignInUi(){
-    var gb = document.getElementById('gbtn');
-    if (gb) gb.style.display = '';
-    var wait = document.getElementById('signinWait');
-    if (wait) wait.style.display = 'none';
-  }
-
-  function signOut(){
-    clearSession();
-    resetSignInUi();
-    document.getElementById('signinErr').textContent = '';
-    document.getElementById('signin').className = 'show';
-  }
-
-  function onGoogleCredential(resp){
-    var gb = document.getElementById('gbtn');
-    if (gb) gb.style.display = 'none';
-    var wait = document.getElementById('signinWait');
-    if (wait) wait.style.display = 'block';
-    document.getElementById('signinErr').textContent = '';
-    api({ api: 'signin', idt: resp.credential }, function(res){
-      if (res.status === 'SIGNED_IN'){
-        saveSession(res.sessionKey, res.name, res.nonce, res.role);
-        document.getElementById('signin').className = '';
-      } else {
-        document.getElementById('signinErr').textContent =
-          (res.headline || 'Sign-in failed') + (res.detail ? ' — ' + res.detail : '');
-        var gb2 = document.getElementById('gbtn');
-        if (gb2) gb2.style.display = '';
-        var w2 = document.getElementById('signinWait');
-        if (w2) w2.style.display = 'none';
-      }
-    });
-  }
-
-  function initSignIn(){
-    var box = document.getElementById('signin');
-    if (!CLIENT_ID){
-      box.className = '';   // no Client ID configured: sign-in disabled, fall back to key mode
-      return;
-    }
-    if (signInReady){ resetSignInUi(); box.className = 'show'; return; }   // already set up: just reopen it
-    var saved = null;
-    try { saved = JSON.parse(sessionStorage.getItem('gatescanner_session') || 'null'); } catch(e){}
-    if (saved && saved.key && saved.nonce && (Date.now() - saved.ts) < 5.5 * 3600 * 1000){
-      saveSession(saved.key, saved.name, saved.nonce, saved.role);
-      box.className = '';
-      return;
-    }
-    box.className = 'show';
-    var s = document.createElement('script');
-    s.src = 'https://accounts.google.com/gsi/client';
-    s.async = true; s.defer = true;
-    s.onload = function(){
-      signInReady = true;
-      google.accounts.id.initialize({
-        client_id: CLIENT_ID,
-        callback: onGoogleCredential,
-        auto_select: false,
-        cancel_on_tap_outside: false
-      });
-      google.accounts.id.renderButton(document.getElementById('gbtn'),
-        { theme: 'filled_black', size: 'large', text: 'signin_with' });
-    };
-    document.head.appendChild(s);
-  }
-
-  setMode('IN');
-  startCamera();          // starts right away, does not wait on sign-in
-  try {
-    initSignIn();
-  } catch (e) {
-    document.getElementById('signinErr').textContent = 'Sign-in setup error: ' + e.message;
-  }
-  if (!CLIENT_ID) {
-    document.getElementById('vol').textContent = VOLKEY ? 'Key ' + VOLKEY.substring(0,4) : 'no key';
-    if (!VOLKEY) {
-      show({ status:'DENIED', headline:'Missing your volunteer key',
-             detail:'Open the personal scanner link your coordinator sent you.' });
-    }
-  }
-</script>
+<script src="scanner.js"></script>
 </body>
 </html>
