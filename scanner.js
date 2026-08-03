@@ -48,15 +48,24 @@
                  'Point at the pass to view details';
   }
 
+  /* One AudioContext, reused. Creating a new one per scan hits the browser's
+     concurrent-context cap (around six) after a handful of scans, at which
+     point construction throws and the beeps stop for the rest of the shift —
+     silently, because the failure is swallowed. Volunteers rely on that sound
+     in a noisy hall more than on the screen. */
+  var audioCtx = null;
   function beep(ok){
     try{
-      var a = new (window.AudioContext||window.webkitAudioContext)();
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();   // mobile suspends until a gesture
+      var a = audioCtx;
       var o = a.createOscillator(), g = a.createGain();
       o.connect(g); g.connect(a.destination);
       o.frequency.value = ok ? 880 : 220;
       g.gain.setValueAtTime(.14, a.currentTime);
       g.gain.exponentialRampToValueAtTime(.0001, a.currentTime + (ok?.16:.42));
       o.start(); o.stop(a.currentTime + (ok?.18:.45));
+      o.onended = function(){ try { o.disconnect(); g.disconnect(); } catch(e){} };
     }catch(e){}
   }
 
@@ -145,13 +154,18 @@
     if (scanner) { try { scanner.resume(); } catch(e){} }
   }
 
-  function api(params, cb){
+  function api(params, cb, timeoutMs){
     var sentUnder = VOLKEY;          // used to spot replies for a superseded session
     var name = 'jp' + Date.now() + Math.floor(Math.random()*1000);
     var s = document.createElement('script');
     var done = false;
+    // Scans return in well under a second; sign-in involves a round trip from
+    // Google to Google and has been measured at over 20. One timeout cannot
+    // serve both — a 15s cap made sign-in fail on screen while succeeding on
+    // the server, leaving the volunteer stuck with a session they could not see.
     var timer = setTimeout(function(){ finish({ status:'INVALID',
-      headline:'No answer from the server', detail:'Check the signal and scan again.' }); }, 15000);
+      headline:'No answer from the server', detail:'Check the signal and try again.' }); },
+      timeoutMs || 15000);
     function finish(res){
       if (done) return;
       done = true;
@@ -339,7 +353,7 @@
         var w2 = document.getElementById('signinWait');
         if (w2) w2.style.display = 'none';
       }
-    });
+    }, 60000);   // sign-in is the slow path: measured over 20s, allow generous headroom
   }
 
   function initSignIn(){
