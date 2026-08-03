@@ -9,7 +9,7 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
   var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
