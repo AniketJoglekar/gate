@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -94,7 +94,8 @@
     document.getElementById('r-verdict').textContent =
       ({ALLOW:'Let them in', EXIT:'Checked out', FULL:'Hold — pass is full',
         WARN:'Check this', INFO:'Details only', INVALID:'Do not admit',
-        BLOCKED:'Do not admit', DENIED:'Access problem'})[res.status] || res.status;
+        BLOCKED:'Do not admit', DENIED:'Access problem',
+        FLAGGED:'Admit — escort to GAC desk first'})[res.status] || res.status;
     document.getElementById('r-headline').textContent = res.headline || '';
     document.getElementById('r-roll').textContent =
       [res.roll, res.dept, res.passId].filter(Boolean).join('  ·  ');
@@ -363,14 +364,20 @@
       return;
     }
     if (signInReady){ resetSignInUi(); box.className = 'show'; return; }   // already set up: just reopen it
+
     var saved = null;
     try { saved = JSON.parse(sessionStorage.getItem('gatescanner_session') || 'null'); } catch(e){}
-    if (saved && saved.key && saved.nonce && (Date.now() - saved.ts) < 5.5 * 3600 * 1000){
-      saveSession(saved.key, saved.name, saved.nonce, saved.role);
-      box.className = '';
-      return;
-    }
-    box.className = 'show';
+    var restored = !!(saved && saved.key && saved.nonce &&
+                      (Date.now() - saved.ts) < 5.5 * 3600 * 1000);
+    if (restored) saveSession(saved.key, saved.name, saved.nonce, saved.role);
+
+    // Show the overlay only if there is no session — but load Google's script
+    // EITHER WAY. Returning early on a restored session left #gbtn empty, so
+    // tapping "Switch" later produced a sign-in screen with no button on it and
+    // no way forward short of reloading the page. Handing the phone to the next
+    // volunteer is precisely when Switch gets used.
+    box.className = restored ? '' : 'show';
+
     var s = document.createElement('script');
     s.src = 'https://accounts.google.com/gsi/client';
     s.async = true; s.defer = true;
