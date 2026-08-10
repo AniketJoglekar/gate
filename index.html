@@ -14,7 +14,7 @@
      AKfycbXXXX below with the id from your /exec URL, then test a scan. -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
-  script-src 'self' https://accounts.google.com https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/ https://script.googleusercontent.com;
+  script-src 'self' https://accounts.google.com https://script.google.com/macros/s/AKfycbXXXX/ https://script.googleusercontent.com;
   style-src 'self' 'unsafe-inline';
   img-src 'self' data: blob:;
   media-src 'self' blob:;
@@ -34,6 +34,7 @@
     --exit:#3B82F6;
     --hold:#F79009;
     --stop:#F04438;
+    --flag:#C026D3;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%}
@@ -90,6 +91,8 @@
   .bg-EXIT{background:var(--exit);color:#03102A}
   .bg-FULL,.bg-WARN{background:var(--hold)}
   .bg-INVALID,.bg-BLOCKED,.bg-DENIED{background:var(--stop);color:#2A0505}
+  .bg-FLAGGED{background:var(--flag);color:#FBEAFE}
+  .bg-FLAGGED .verdict,.bg-FLAGGED .roll,.bg-FLAGGED .detail{opacity:.95}
   .bg-INFO{background:var(--text);color:var(--ink)}
 
   /* ---- manual ---- */
