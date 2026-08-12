@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -82,7 +82,7 @@
     /* Any verdict from the server resolves the request: the next scan of this
        pass is a new person, not a retry. Only client-synthesised transport
        failures keep the key alive. */
-    if (!res._transport) clearRid();
+    if (!res._transport) { clearRid(); failedRequest = null; }
     if (res.status === 'DENIED' && CLIENT_ID){
       // Only ignore a rejection that belongs to a session we have since replaced.
       // Previously this checked "is VOLKEY set", which was true both before and
@@ -134,13 +134,28 @@
        last real verdict and re-offer the same buttons — retrying is safe because
        the key is derived from the extend's parameters, so a request that did
        reach the server returns its cached result rather than admitting again. */
-    var recovering = false;
+    /* Transport failure: exactly one correct action, which is resending the
+       request that failed. Offering a menu of counts here was wrong — after a
+       failed +1, a "Retry +2" is a DIFFERENT request the server has no reason to
+       deduplicate, so tapping it would admit again on top of the first. */
     if (res._transport){
-      if (lastGood) { res = lastGood; recovering = true; }
-      else { addDiagnostics(box); return; }
-    } else if (res.status !== 'ALLOW' && res.status !== 'EXIT') {
+      if (failedRequest){
+        var rb = document.createElement('button');
+        rb.type = 'button';
+        rb.textContent = 'Retry';
+        rb.addEventListener('click', function(ev){
+          ev.stopPropagation();
+          rb.disabled = true;
+          retryFailed();
+        });
+        box.appendChild(rb);
+        document.getElementById('r-detail').textContent =
+          'No reply from the server. Tap Retry above — do NOT scan the pass again.';
+      }
+      addDiagnostics(box);
       return;
     }
+    if (res.status !== 'ALLOW' && res.status !== 'EXIT') return;
 
     var free, action, verb;
     if (res.status === 'ALLOW'){
@@ -163,7 +178,7 @@
            instead generates a new key and, if the lost request had actually
            succeeded, consumes a second slot for someone already counted. The
            volunteer has no way to know that, so the UI has to say it. */
-        b.textContent = recovering ? ('Retry +' + n) : ('+' + n + ' ' + verb);
+        b.textContent = '+' + n + ' ' + verb;
         b.addEventListener('click', function(ev){
           /* The overlay itself dismisses on click. Without this the tap would
              both extend and close the result. */
@@ -178,11 +193,6 @@
         });
         box.appendChild(b);
       })(i);
-    }
-    if (recovering){
-      document.getElementById('r-detail').textContent =
-        'No reply from the server. Tap Retry above — do NOT scan the pass again.';
-      addDiagnostics(box);
     }
   }
 
@@ -283,6 +293,16 @@
      be read off the phone itself rather than needing a tethered debugger. */
   var LAST_FAIL_URL = '';
 
+  /* The exact params of the last request that failed in transport. Retrying
+     means resending THIS, not building something similar. */
+  var failedRequest = null;
+
+  function retryFailed(){
+    if (!failedRequest) return;
+    showPending();
+    api(failedRequest, show);
+  }
+
   function api(params, cb, timeoutMs, _isRetry){
     var sentUnder = VOLKEY;          // used to spot replies for a superseded session
     var name = 'jp' + Date.now() + Math.floor(Math.random()*1000);
@@ -303,6 +323,13 @@
                    1200 + Math.floor(Math.random() * 1600));
         return;
       }
+      /* Keep the EXACT request that failed, rid included, so a manual retry can
+         resend it byte for byte. Deriving a key from a heuristic and a time
+         window did not survive contact with reality: recovering from a dropped
+         connection takes longer than any window worth allowing, so the key had
+         expired by the time the volunteer tapped Retry and the server counted a
+         second admission. */
+      if (res && res._transport && params.rid) failedRequest = params;
       cb(res);
     }
 
@@ -433,6 +460,10 @@
        already counted — leaving a phantom occupant and refusing the third real
        guest. The clamp prevents exceeding capacity; it does not prevent wasting
        a slot, and at capacity 3 one wasted slot is a third of the pass. */
+    /* Still keyed on the extend's own parameters so an immediate repeat dedupes,
+       but recovery no longer depends on this: a transport failure stashes the
+       whole request and the Retry button resends it with this same rid however
+       long the volunteer takes. */
     params.rid = ridFor('X:' + (lastRequest.t || lastRequest.id) + ':' + action + ':' + n);
     showPending();
     api(params, show);
