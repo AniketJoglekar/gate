@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -255,14 +255,14 @@
     pendingTimer = null;
     busy = false;
     document.getElementById('result').className = '';
-    if (scanner) { try { scanner.resume(); } catch(e){} }
+    resumeScanner_();
   }
 
   function dismiss(){
     if (pending) return;              // ignore taps while waiting for the server
     document.getElementById('result').className = '';
     busy = false;
-    if (scanner) { try { scanner.resume(); } catch(e){} }
+    resumeScanner_();
   }
 
   function newRid(){
@@ -475,12 +475,39 @@
      guests two and three on the same pass, and with three-per-pass that is the
      ordinary case, not an edge case. The failure was invisible: no beep, no
      overlay, the camera simply looked frozen. */
+  /* Two different jobs, two different clocks.
+
+     DUPE_WINDOW_MS covers the handful of duplicate frames the decoder emits
+     between a successful read and busy/pause taking effect — milliseconds.
+
+     SAME_PASS_GRACE_MS covers the pass still physically in front of the lens
+     when the camera resumes after a dismissal. That is measured from the RESUME,
+     not from the last decode: an interaction can run thirty seconds or more
+     (timeout, retry, result, dismiss), by which point a window measured from the
+     decode has long expired. The same pass is then read again immediately, and
+     again after that, and the volunteer cannot move on to the next guest. */
   var DUPE_WINDOW_MS = 700;
+  var SAME_PASS_GRACE_MS = 2500;
+  var resumeAt = 0;
+
+  function resumeScanner_(){
+    resumeAt = Date.now();
+    if (scanner) { try { scanner.resume(); } catch(e){} }
+  }
 
   function onScan(text){
     var now = Date.now();
     if (busy) return;
-    if (text === lastCode && now - lastAt < DUPE_WINDOW_MS) return;
+    if (text === lastCode &&
+        (now - lastAt < DUPE_WINDOW_MS || now - resumeAt < SAME_PASS_GRACE_MS)) {
+      /* Say so. A silent block is exactly what made the old four-second window
+         drop guests two and three with no indication anything had happened. */
+      var h = document.getElementById('hint');
+      if (h) h.textContent = 'Same pass still in view — move it away for the next one.';
+      return;
+    }
+    var h2 = document.getElementById('hint');
+    if (h2 && h2.textContent.indexOf('Same pass') === 0) h2.textContent = '';
     lastCode = text; lastAt = now;
     if (scanner) { try { scanner.pause(true); } catch(e){} }
     send(text);
