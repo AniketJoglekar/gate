@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -122,6 +122,22 @@
     box.innerHTML = '';
     if (!lastRequest) return;
 
+    /* Transport failure: offer the failing address instead of an extend button.
+       Volunteers will not use this; whoever is debugging at 6pm will. */
+    if (res._transport && LAST_FAIL_URL){
+      var d = document.createElement('button');
+      d.type = 'button';
+      d.textContent = 'Diagnostics';
+      d.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var e = document.getElementById('err');
+        e.style.wordBreak = 'break-all';
+        e.textContent = LAST_FAIL_URL;
+      });
+      box.appendChild(d);
+      return;
+    }
+
     var free, action, verb;
     if (res.status === 'ALLOW'){
       free = Math.max(0, (Number(res.capacity) || 0) - (Number(res.inside) || 0));
@@ -174,7 +190,10 @@
     pendingTimer = setInterval(function(){
       var s = Math.round((Date.now() - t0) / 1000);
       det.textContent = s < 4 ? 'Looking up the pass\u2026'
-        : 'Still working \u2014 ' + s + 's. Do not scan again yet.';
+        /* Was "Do not scan again yet", which contradicted the timeout message
+           telling the volunteer to rescan. Rescanning is safe: ridFor() keeps
+           the idempotency key alive through a transport failure. */
+        : 'Still working \u2014 ' + s + 's.';
     }, 500);
   }
 
@@ -227,20 +246,26 @@
 
   function clearRid(){ pendingCode = null; pendingRid = null; pendingAt = 0; }
 
+  /* Last URL that failed at transport level. Exposed on the page so a fault can
+     be read off the phone itself rather than needing a tethered debugger. */
+  var LAST_FAIL_URL = '';
+
   function api(params, cb, timeoutMs, _isRetry){
     var sentUnder = VOLKEY;          // used to spot replies for a superseded session
     var name = 'jp' + Date.now() + Math.floor(Math.random()*1000);
     var s = document.createElement('script');
     var done = false;
 
-    function retryOrFail(res){
-      /* One automatic retry, same rid, AFTER a jittered pause.
-         Retrying immediately doubled request volume at the exact moment the
-         server was slowest — and because every gate would time out together,
-         the retries arrived together too. Fifteen gates with two requests in
-         flight each is 30 concurrent, which is the Apps Script ceiling.
-         The pause spreads them; the jitter stops them re-synchronising. */
-      if (!_isRetry && params.rid){
+    /* Retry ONLY an instant failure, never a timeout.
+       A timeout means the server is slow — retrying then doubles load on an
+       already-struggling service, and because every gate times out together the
+       retries arrive together too. A timeout now needs no automatic retry
+       anyway: ridFor() keeps the idempotency key alive after a transport
+       failure, so the volunteer simply scanning the pass again is deduplicated
+       server-side. That keeps a human in the loop and applies natural
+       backpressure, which an automatic retry removes. */
+    function retryOrFail(res, wasTimeout){
+      if (!_isRetry && !wasTimeout && params.rid){
         setTimeout(function(){ api(params, cb, timeoutMs, true); },
                    1200 + Math.floor(Math.random() * 1600));
         return;
@@ -252,20 +277,31 @@
        case is ~16s rather than ~30s — and at a gate running one person every
        eleven seconds, 30s of frozen camera is three people of dead air.
        Sign-in passes its own 60000 and is unaffected. */
+    /* 15s, matching the server's LockService.waitLock(15000).
+       This was briefly 8s, which was shorter than the server's own lock wait —
+       so the client abandoned requests the server was still legitimately
+       processing, then fired a retry onto the same slow execution. Apps Script
+       cold starts alone routinely exceed 8 seconds. A client timeout must never
+       be shorter than the server is willing to wait. */
     var timer = setTimeout(function(){ finish({ status:'INVALID', _transport:true,
-      headline:'No answer from the server',
-      detail:'Check the signal and scan the same pass again — it will not double-count.' },
-      true); },
-      timeoutMs || 8000);
+      headline:'Server is taking too long',
+      detail:'Scan the same pass again — it will not double-count.' },
+      true, true); },
+      timeoutMs || 15000);
 
-    function finish(res, retryable){
+    function finish(res, retryable, wasTimeout){
       if (done) return;
       done = true;
       clearTimeout(timer);
-      try { delete window[name]; } catch(e){ window[name] = undefined; }
+      /* Leave a no-op behind rather than deleting the name. A response that
+         lands after we gave up would otherwise execute jpNNN(...) against a
+         missing global and throw an uncaught ReferenceError — console noise
+         during exactly the stall someone would be debugging. */
+      window[name] = function(){};
+      setTimeout(function(){ try { delete window[name]; } catch(e){ window[name] = undefined; } }, 30000);
       if (s.parentNode) s.parentNode.removeChild(s);
       if (res && typeof res === 'object') res._staleSession = (sentUnder !== VOLKEY);
-      if (retryable) retryOrFail(res || { status:'INVALID', headline:'Bad reply from the server' });
+      if (retryable) retryOrFail(res || { status:'INVALID', headline:'Bad reply from the server' }, wasTimeout);
       else cb(res || { status:'INVALID', headline:'Bad reply from the server' });
     }
 
@@ -278,11 +314,19 @@
     }).join('&');
     s.src = API_URL + '?' + q;
     s.onerror = function(){
-      // Two causes look identical here: no network, or the page's CSP refusing
-      // the request. The CSP case is silent and easy to misdiagnose, so name it.
+      /* onerror fires for a refused request or an HTTP error status — never for
+         a bad response body. Several causes look identical from here (no signal,
+         CSP refusal, HTTP 4xx/5xx from Google), so this must NOT assert one of
+         them: an earlier version blamed the CSP and sent a correctly-configured
+         deployment chasing its own key for an unrelated fault.
+
+         The failing URL is stashed so LAST_FAIL_URL can be read from the page
+         without a laptop and a remote debugger. */
+      LAST_FAIL_URL = s.src;
+      try { console.error('gate: request failed: ' + s.src); } catch(e){}
       finish({ status:'INVALID', _transport:true, headline:'Could not reach the server',
-        detail:'Check the signal. If this happens on every scan, the script-src '
-             + 'line in index.html may still contain the AKfycbXXXX placeholder.' },
+        detail:'The request was refused before the server answered. Tap "Diagnostics" '
+             + 'below for the failing address.' },
         true);
     };
     document.body.appendChild(s);
@@ -334,7 +378,11 @@
     var params = {};
     for (var key in lastRequest) params[key] = lastRequest[key];
     params.action = action;
-    params.c      = n;
+    /* Named 'cnt', not 'c'. A single generic letter in a query string to Google
+       infrastructure is a needless gamble against reserved or filtered names,
+       and this parameter failed deterministically as 'c' in field testing while
+       every other parameter on the same request went through. */
+    params.cnt    = n;
     /* A fresh rid per tap. Each extend is a genuinely new admission, so reusing
        the scan's rid would have the server's idempotency swallow it as a retry. */
     params.rid = newRid();
