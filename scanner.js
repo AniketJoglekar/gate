@@ -69,8 +69,16 @@
     }catch(e){}
   }
 
+  /* Last verdict that actually came from the server. A transport failure carries
+     no occupancy figures, so without this there is no way to re-offer the extend
+     buttons — and re-offering them is the only route back for a volunteer whose
+     extend timed out. */
+  var lastGood = null;
+
   function show(res){
     clearPending();
+    if (!res._transport &&
+        (res.status === 'ALLOW' || res.status === 'EXIT')) lastGood = res;
     /* Any verdict from the server resolves the request: the next scan of this
        pass is a new person, not a retry. Only client-synthesised transport
        failures keep the key alive. */
@@ -122,19 +130,15 @@
     box.innerHTML = '';
     if (!lastRequest) return;
 
-    /* Transport failure: offer the failing address instead of an extend button.
-       Volunteers will not use this; whoever is debugging at 6pm will. */
-    if (res._transport && LAST_FAIL_URL){
-      var d = document.createElement('button');
-      d.type = 'button';
-      d.textContent = 'Diagnostics';
-      d.addEventListener('click', function(ev){
-        ev.stopPropagation();
-        var e = document.getElementById('err');
-        e.style.wordBreak = 'break-all';
-        e.textContent = LAST_FAIL_URL;
-      });
-      box.appendChild(d);
+    /* Transport failure. The response carries no occupancy, so fall back to the
+       last real verdict and re-offer the same buttons — retrying is safe because
+       the key is derived from the extend's parameters, so a request that did
+       reach the server returns its cached result rather than admitting again. */
+    var recovering = false;
+    if (res._transport){
+      if (lastGood) { res = lastGood; recovering = true; }
+      else { addDiagnostics(box); return; }
+    } else if (res.status !== 'ALLOW' && res.status !== 'EXIT') {
       return;
     }
 
@@ -154,7 +158,12 @@
       (function(n){
         var b = document.createElement('button');
         b.type = 'button';
-        b.textContent = '+' + n + ' ' + verb;
+        /* In recovery the label must not read like a fresh action. Retrying via
+           this button reuses the idempotency key and is safe; rescanning the pass
+           instead generates a new key and, if the lost request had actually
+           succeeded, consumes a second slot for someone already counted. The
+           volunteer has no way to know that, so the UI has to say it. */
+        b.textContent = recovering ? ('Retry +' + n) : ('+' + n + ' ' + verb);
         b.addEventListener('click', function(ev){
           /* The overlay itself dismisses on click. Without this the tap would
              both extend and close the result. */
@@ -170,6 +179,25 @@
         box.appendChild(b);
       })(i);
     }
+    if (recovering){
+      document.getElementById('r-detail').textContent =
+        'No reply from the server. Tap Retry above — do NOT scan the pass again.';
+      addDiagnostics(box);
+    }
+  }
+
+  function addDiagnostics(box){
+    if (!LAST_FAIL_URL) return;
+    var d = document.createElement('button');
+    d.type = 'button';
+    d.textContent = 'Diagnostics';
+    d.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      var e = document.getElementById('err');
+      e.style.wordBreak = 'break-all';
+      e.textContent = LAST_FAIL_URL;
+    });
+    box.appendChild(d);
   }
 
   var pending = false, pendingTimer = null;
@@ -283,9 +311,14 @@
        processing, then fired a retry onto the same slow execution. Apps Script
        cold starts alone routinely exceed 8 seconds. A client timeout must never
        be shorter than the server is willing to wait. */
-    var timer = setTimeout(function(){ finish({ status:'INVALID', _transport:true,
+    /* Set for the timeout path too. Previously only s.onerror set it, so a
+       timeout either showed no Diagnostics button or — worse — showed a stale
+       URL from an earlier, unrelated failure. A diagnostic that lies is worse
+       than none. */
+    var timer = setTimeout(function(){ LAST_FAIL_URL = s.src;
+      finish({ status:'INVALID', _transport:true,
       headline:'Server is taking too long',
-      detail:'Scan the same pass again — it will not double-count.' },
+      detail:'No reply. If a Retry button is shown, use it rather than rescanning.' },
       true, true); },
       timeoutMs || 15000);
 
@@ -383,9 +416,19 @@
        and this parameter failed deterministically as 'c' in field testing while
        every other parameter on the same request went through. */
     params.cnt    = n;
-    /* A fresh rid per tap. Each extend is a genuinely new admission, so reusing
-       the scan's rid would have the server's idempotency swallow it as a retry. */
-    params.rid = newRid();
+    /* A key derived from the extend's own parameters, NOT a fresh one.
+       An earlier version used newRid() on the reasoning that an extend is a new
+       admission and must not be swallowed as a retry of the scan. True, but it
+       stopped one step short: the key must be new relative to the SCAN and
+       stable relative to THIS extend.
+
+       With a fresh key, a timed-out extend that actually succeeded could not be
+       safely repeated. The volunteer's only recourse was to rescan the pass,
+       which generated another new key and consumed a second slot for a person
+       already counted — leaving a phantom occupant and refusing the third real
+       guest. The clamp prevents exceeding capacity; it does not prevent wasting
+       a slot, and at capacity 3 one wasted slot is a third of the pass. */
+    params.rid = ridFor('X:' + (lastRequest.t || lastRequest.id) + ':' + action + ':' + n);
     showPending();
     api(params, show);
   }
