@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -71,6 +71,10 @@
 
   function show(res){
     clearPending();
+    /* Any verdict from the server resolves the request: the next scan of this
+       pass is a new person, not a retry. Only client-synthesised transport
+       failures keep the key alive. */
+    if (!res._transport) clearRid();
     if (res.status === 'DENIED' && CLIENT_ID){
       // Only ignore a rejection that belongs to a session we have since replaced.
       // Previously this checked "is VOLKEY set", which was true both before and
@@ -94,8 +98,7 @@
     document.getElementById('r-verdict').textContent =
       ({ALLOW:'Let them in', EXIT:'Checked out', FULL:'Hold — pass is full',
         WARN:'Check this', INFO:'Details only', INVALID:'Do not admit',
-        BLOCKED:'Do not admit', DENIED:'Access problem',
-        FLAGGED:'Admit — escort to GAC desk first'})[res.status] || res.status;
+        BLOCKED:'Do not admit', DENIED:'Access problem'})[res.status] || res.status;
     document.getElementById('r-headline').textContent = res.headline || '';
     document.getElementById('r-roll').textContent =
       [res.roll, res.dept, res.passId].filter(Boolean).join('  ·  ');
@@ -105,7 +108,52 @@
     for (var i = 1; i <= cap; i++) pips += '<div class="pip' + (i <= res.inside ? ' on' : '') + '"></div>';
     document.getElementById('r-pips').innerHTML = pips;
 
-    document.getElementById('r-actions').innerHTML = '';
+    renderActions(res);
+  }
+
+  /* Group-admit buttons. #r-actions was present and styled but always emptied —
+     a dead affordance sitting exactly where these belong.
+
+     The counts offered come from the server's own occupancy figure, so the UI
+     cannot propose more than is available. The server clamp is the backstop,
+     not the control. */
+  function renderActions(res){
+    var box = document.getElementById('r-actions');
+    box.innerHTML = '';
+    if (!lastRequest) return;
+
+    var free, action, verb;
+    if (res.status === 'ALLOW'){
+      free = Math.max(0, (Number(res.capacity) || 0) - (Number(res.inside) || 0));
+      action = 'IN';  verb = 'more in';
+    } else if (res.status === 'EXIT'){
+      free = Math.max(0, Number(res.inside) || 0);
+      action = 'OUT'; verb = 'more out';
+    } else {
+      return;                                  // nothing to extend from
+    }
+    if (free < 1) return;
+
+    for (var i = 1; i <= Math.min(free, 4); i++){
+      (function(n){
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = '+' + n + ' ' + verb;
+        b.addEventListener('click', function(ev){
+          /* The overlay itself dismisses on click. Without this the tap would
+             both extend and close the result. */
+          ev.stopPropagation();
+          /* Disable on first tap: a double-tap sends two calls with different
+             rids, which the server correctly treats as two real requests. The
+             clamp stops over-admission, but pips jumping 1 -> 2 -> 3 in front of
+             a volunteer does not inspire confidence. */
+          var all = box.querySelectorAll('button');
+          for (var j = 0; j < all.length; j++) all[j].disabled = true;
+          extend(action, n);
+        });
+        box.appendChild(b);
+      })(i);
+    }
   }
 
   var pending = false, pendingTimer = null;
@@ -155,28 +203,73 @@
     if (scanner) { try { scanner.resume(); } catch(e){} }
   }
 
-  function api(params, cb, timeoutMs){
+  function newRid(){
+    return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  }
+
+  /* An idempotency key belongs to an unresolved REQUEST, not to an attempt.
+     If a scan fails in transport, the next scan of that same pass is almost
+     certainly the volunteer retrying — so it reuses the key and the server
+     collapses the pair. Once any definitive verdict arrives the key is cleared,
+     so the next scan of the same pass is a genuinely new person and counts.
+
+     Bounded to 60s: the server's idempotency cache lives 300s, and beyond a
+     minute a rescan is far more likely to be a real second guest than a retry. */
+  var pendingRid = null, pendingCode = null, pendingAt = 0;
+
+  function ridFor(code){
+    if (code === pendingCode && pendingRid && (Date.now() - pendingAt) < 60000) {
+      return pendingRid;
+    }
+    pendingCode = code; pendingRid = newRid(); pendingAt = Date.now();
+    return pendingRid;
+  }
+
+  function clearRid(){ pendingCode = null; pendingRid = null; pendingAt = 0; }
+
+  function api(params, cb, timeoutMs, _isRetry){
     var sentUnder = VOLKEY;          // used to spot replies for a superseded session
     var name = 'jp' + Date.now() + Math.floor(Math.random()*1000);
     var s = document.createElement('script');
     var done = false;
-    // Scans return in well under a second; sign-in involves a round trip from
-    // Google to Google and has been measured at over 20. One timeout cannot
-    // serve both — a 15s cap made sign-in fail on screen while succeeding on
-    // the server, leaving the volunteer stuck with a session they could not see.
-    var timer = setTimeout(function(){ finish({ status:'INVALID',
-      headline:'No answer from the server', detail:'Check the signal and try again.' }); },
-      timeoutMs || 15000);
-    function finish(res){
+
+    function retryOrFail(res){
+      /* One automatic retry, same rid, AFTER a jittered pause.
+         Retrying immediately doubled request volume at the exact moment the
+         server was slowest — and because every gate would time out together,
+         the retries arrived together too. Fifteen gates with two requests in
+         flight each is 30 concurrent, which is the Apps Script ceiling.
+         The pause spreads them; the jitter stops them re-synchronising. */
+      if (!_isRetry && params.rid){
+        setTimeout(function(){ api(params, cb, timeoutMs, true); },
+                   1200 + Math.floor(Math.random() * 1600));
+        return;
+      }
+      cb(res);
+    }
+
+    /* 8s per attempt, not 15. With one automatic retry the volunteer's worst
+       case is ~16s rather than ~30s — and at a gate running one person every
+       eleven seconds, 30s of frozen camera is three people of dead air.
+       Sign-in passes its own 60000 and is unaffected. */
+    var timer = setTimeout(function(){ finish({ status:'INVALID', _transport:true,
+      headline:'No answer from the server',
+      detail:'Check the signal and scan the same pass again — it will not double-count.' },
+      true); },
+      timeoutMs || 8000);
+
+    function finish(res, retryable){
       if (done) return;
       done = true;
       clearTimeout(timer);
       try { delete window[name]; } catch(e){ window[name] = undefined; }
       if (s.parentNode) s.parentNode.removeChild(s);
       if (res && typeof res === 'object') res._staleSession = (sentUnder !== VOLKEY);
-      cb(res || { status:'INVALID', headline:'Bad reply from the server' });
+      if (retryable) retryOrFail(res || { status:'INVALID', headline:'Bad reply from the server' });
+      else cb(res || { status:'INVALID', headline:'Bad reply from the server' });
     }
-    window[name] = finish;
+
+    window[name] = function(res){ finish(res, false); };
     params.callback = name;
     params.k = VOLKEY;
     params.n = NONCE;
@@ -187,12 +280,17 @@
     s.onerror = function(){
       // Two causes look identical here: no network, or the page's CSP refusing
       // the request. The CSP case is silent and easy to misdiagnose, so name it.
-      finish({ status:'INVALID', headline:'Could not reach the server',
+      finish({ status:'INVALID', _transport:true, headline:'Could not reach the server',
         detail:'Check the signal. If this happens on every scan, the script-src '
-             + 'line in index.html may still contain the AKfycbXXXX placeholder.' });
+             + 'line in index.html may still contain the AKfycbXXXX placeholder.' },
+        true);
     };
     document.body.appendChild(s);
   }
+
+  /* What to re-send when the volunteer extends an admission. lastCode cannot be
+     reused: it is the duplicate-suppression state below and gets cleared. */
+  var lastRequest = null;    // { api:'scan', t:code } or { api:'manual', id:v }
 
   function send(code){
     if (CLIENT_ID && !VOLKEY){
@@ -202,21 +300,60 @@
       return;
     }
     document.getElementById('err').textContent = '';
+    lastRequest = { api:'scan', t:code };
     showPending();
-    api({ api:'scan', t:code, action:MODE }, show);
+    api({ api:'scan', t:code, action:MODE, rid:ridFor(code) }, show);
   }
 
   function sendManual(){
     var v = document.getElementById('manualId').value;
     if(!v) return;
     document.getElementById('manualId').value = '';
-    api({ api:'manual', id:v, action:MODE }, show);
+    lastRequest = { api:'manual', id:v };
+    showPending();
+    api({ api:'manual', id:v, action:MODE, rid:ridFor('M:' + v) }, show);
   }
+
+  /* Group admit: one more round trip instead of one more full scan cycle.
+     A family of three costs one decode, one identity check and one dismiss
+     rather than three of each — and two lock acquisitions on the server
+     rather than three. */
+  function extend(action, n){
+    if (!lastRequest) return;
+    /* Same guard as send(). A session that expired between the scan and this tap
+       would otherwise fire a call with an empty key, get DENIED, and drop the
+       volunteer at the sign-in screen mid-party with nothing explaining why. */
+    if (CLIENT_ID && !VOLKEY){
+      resetSignInUi();
+      document.getElementById('signin').className = 'show';
+      releaseScanner();
+      return;
+    }
+    /* Copy: api() mutates the object it is given (callback, k, n), and
+       lastRequest must stay clean for a second extend. */
+    var params = {};
+    for (var key in lastRequest) params[key] = lastRequest[key];
+    params.action = action;
+    params.c      = n;
+    /* A fresh rid per tap. Each extend is a genuinely new admission, so reusing
+       the scan's rid would have the server's idempotency swallow it as a retry. */
+    params.rid = newRid();
+    showPending();
+    api(params, show);
+  }
+
+  /* 700 ms, not 4000. This only needs to outlast the duplicate frames the
+     decoder emits between a successful read and busy/pause taking effect —
+     which is milliseconds. The old four-second window silently discarded
+     guests two and three on the same pass, and with three-per-pass that is the
+     ordinary case, not an edge case. The failure was invisible: no beep, no
+     overlay, the camera simply looked frozen. */
+  var DUPE_WINDOW_MS = 700;
 
   function onScan(text){
     var now = Date.now();
     if (busy) return;
-    if (text === lastCode && now - lastAt < 4000) return;
+    if (text === lastCode && now - lastAt < DUPE_WINDOW_MS) return;
     lastCode = text; lastAt = now;
     if (scanner) { try { scanner.pause(true); } catch(e){} }
     send(text);
@@ -249,46 +386,81 @@
 
   var ATTEMPTS = [[1000,false],[1500,false],[700,false],[1000,true],[1600,true],[500,false]];
 
+  /* jsQR is 252 KB and serves only the photo fallback, which is used rarely.
+     Loading it on demand halves the initial page weight on gate wifi.
+     script-src 'self' already permits this; no CSP change needed. */
+  var jsqrLoading = null;
+  function ensureJsQR(){
+    if (typeof jsQR !== 'undefined') return Promise.resolve(true);
+    if (jsqrLoading) return jsqrLoading;
+    jsqrLoading = new Promise(function(res){
+      var el = document.createElement('script');
+      el.src = 'jsQR.js';
+      el.onload  = function(){ res(typeof jsQR !== 'undefined'); };
+      el.onerror = function(){ res(false); };
+      document.head.appendChild(el);
+    });
+    return jsqrLoading;
+  }
+
   function scanPhoto(input){
     var f = input.files && input.files[0];
     if(!f) return;
-    if (typeof jsQR === 'undefined'){
-      document.getElementById('err').textContent =
-        'Decoder did not load. Check the phone has internet, then reload this page.';
-      return;
-    }
-    input.value = '';
     var err = document.getElementById('err');
-    err.textContent = 'Reading photo\u2026';
-    loadImage_(f).then(function(img){
-      for (var i = 0; i < ATTEMPTS.length; i++){
-        var text = null;
-        try { text = tryDecode_(img, ATTEMPTS[i][0], ATTEMPTS[i][1]); } catch(e){}
-        if (text){
-          err.textContent = '';
-          lastCode = ''; busy = false;
-          send(text);
-          return;
-        }
+    err.textContent = 'Loading decoder\u2026';
+    ensureJsQR().then(function(ready){
+      if (!ready){
+        err.textContent = 'Decoder did not load. Check the phone has internet, '
+                        + 'then reload this page.';
+        return;
       }
-      err.textContent = 'No QR found in that photo. Move closer so the code fills '
-                      + 'most of the frame, hold the phone flat, and keep it steady.';
-    }).catch(function(){
-      err.textContent = 'Could not open that photo. Try again.';
+      input.value = '';
+      err.textContent = 'Reading photo\u2026';
+      loadImage_(f).then(function(img){
+        for (var i = 0; i < ATTEMPTS.length; i++){
+          var text = null;
+          try { text = tryDecode_(img, ATTEMPTS[i][0], ATTEMPTS[i][1]); } catch(e){}
+          if (text){
+            err.textContent = '';
+            lastCode = ''; busy = false;
+            send(text);
+            return;
+          }
+        }
+        err.textContent = 'No QR found in that photo. Move closer so the code fills '
+                        + 'most of the frame, hold the phone flat, and keep it steady.';
+      }).catch(function(){
+        err.textContent = 'Could not open that photo. Try again.';
+      });
     });
   }
 
   function startCamera(){
-    scanner = new Html5Qrcode('reader', { verbose:false });
-    scanner.start(
-      { facingMode: 'environment' },
-      { fps: 12, qrbox: { width: 240, height: 240 } },
-      onScan,
-      function(){}
-    ).catch(function(){
+    /* A 404 on the library throws a ReferenceError here, and that throw is
+       OUTSIDE the .catch() below — it would abort the rest of this file at top
+       level, so initSignIn() never runs and the volunteer gets a dead page
+       instead of the working photo fallback. */
+    if (typeof Html5Qrcode === 'undefined'){
       document.getElementById('hint').textContent =
-        'Live camera blocked on this phone — use "Take photo of pass" below.';
-    });
+        'Camera library did not load — use "Take photo of pass" below.';
+      return;
+    }
+    try {
+      scanner = new Html5Qrcode('reader', { verbose:false });
+      scanner.start(
+        { facingMode: 'environment' },
+        { fps: 12, qrbox: { width: 240, height: 240 } },
+        onScan,
+        function(){}
+      ).catch(function(){
+        document.getElementById('hint').textContent =
+          'Live camera blocked on this phone — use "Take photo of pass" below.';
+      });
+    } catch (e) {
+      scanner = null;
+      document.getElementById('hint').textContent =
+        'Camera unavailable — use "Take photo of pass" below.';
+    }
   }
 
   var SESSION_KEY = '';

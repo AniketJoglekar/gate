@@ -14,7 +14,7 @@
      AKfycbXXXX below with the id from your /exec URL, then test a scan. -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
-  script-src 'self' https://accounts.google.com https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/ https://script.googleusercontent.com;
+  script-src 'self' https://accounts.google.com https://script.google.com/macros/s/AKfycbXXXX/ https://script.googleusercontent.com;
   style-src 'self' 'unsafe-inline';
   img-src 'self' data: blob:;
   media-src 'self' blob:;
@@ -34,7 +34,6 @@
     --exit:#3B82F6;
     --hold:#F79009;
     --stop:#F04438;
-    --flag:#C026D3;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%}
@@ -79,6 +78,7 @@
   #result .actions button{flex:1;border:2px solid currentColor;border-radius:14px;
     padding:18px 0;background:rgba(255,255,255,.5);color:inherit;
     font:800 17px/1 inherit;cursor:pointer}
+  #result .actions button:disabled{opacity:.45}
   #result .tapaway{margin-top:auto;font:600 13px/1 inherit;letter-spacing:.1em;
                    text-transform:uppercase;opacity:.55;text-align:center}
 
@@ -91,8 +91,6 @@
   .bg-EXIT{background:var(--exit);color:#03102A}
   .bg-FULL,.bg-WARN{background:var(--hold)}
   .bg-INVALID,.bg-BLOCKED,.bg-DENIED{background:var(--stop);color:#2A0505}
-  .bg-FLAGGED{background:var(--flag);color:#FBEAFE}
-  .bg-FLAGGED .verdict,.bg-FLAGGED .roll,.bg-FLAGGED .detail{opacity:.95}
   .bg-INFO{background:var(--text);color:var(--ink)}
 
   /* ---- manual ---- */
@@ -152,7 +150,6 @@
   <button id="photoBtn">📷 Take photo of pass (if camera above will not scan)</button>
   <input type="file" id="photoIn" accept="image/*" capture="environment"
          style="display:none">
-  <div id="filereader" style="position:absolute;left:-10000px;top:0;width:320px;height:320px"></div>
   <details id="manualBox" style="display:none">
     <summary>Pass damaged? Type the Pass ID</summary>
     <div class="manual">
@@ -187,9 +184,22 @@
 
 
 <!-- Self-hosted: no third-party CDN, works on a restricted network, nothing to tamper with.
-     Upload html5-qrcode.min.js and jsQR.js into this same folder. -->
+     Upload html5-qrcode.min.js and jsQR.js into this same folder.
+
+     CHECK THE FILENAME on the server. This tag requests html5-qrcode.min.js;
+     the file shipped in the project folder is named html5-qrcode_min.js. A 404
+     here leaves the live camera dead (the photo fallback still works).
+
+     jsQR.js is deliberately NOT loaded here. It is 252 KB and serves only the
+     photo fallback, so scanner.js fetches it on demand the first time the
+     fallback is used. Warm it during the pre-event check by taking one photo on
+     each phone.
+
+     THESE PATHS ARE RELATIVE. Served at /convocation2026 WITHOUT a trailing
+     slash they resolve against the domain root, 404, and the page is dead with
+     nothing on screen to explain it. Confirm the server 301-redirects
+     /convocation2026 to /convocation2026/ — or make these paths absolute. -->
 <script src="html5-qrcode.min.js"></script>
-<script src="jsQR.js"></script>
 <script src="scanner.js"></script>
 </body>
 </html>
