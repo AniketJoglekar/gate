@@ -193,8 +193,13 @@
     d.textContent = 'Diagnostics';
     d.addEventListener('click', function(ev){
       ev.stopPropagation();
-      var e = document.getElementById('err');
+      /* Must write INSIDE the overlay. This previously targeted #err, which sits
+         outside #result — and #result is position:fixed inset:0 z-index:20, so
+         the text rendered behind a full-screen panel. Field report: "the
+         diagnostics button didn't do anything." It did; nobody could see it. */
+      var e = document.getElementById('r-detail');
       e.style.wordBreak = 'break-all';
+      e.style.fontSize = '12px';
       e.textContent = LAST_FAIL_URL;
     });
     box.appendChild(d);
