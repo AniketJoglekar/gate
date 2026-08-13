@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -55,6 +55,14 @@
 
   function setMode(m){
     MODE = m;
+    /* Persist across reloads. Without this every page load silently reverted to
+       Entry — so an exit gate that reloaded (battery swap, crash, an accidental
+       pull-to-refresh, iOS reclaiming a backgrounded tab) began ADMITTING
+       departing guests. Occupancy climbs, and the family is refused on return.
+       Nothing on screen says "wrong mode"; the volunteer sees a normal success.
+       sessionStorage clears when the tab closes, so a phone reassigned to a
+       different gate still starts clean. */
+    try { sessionStorage.setItem('gatescanner_mode', m); } catch(e){}
     ['IN','OUT','CHECK'].forEach(function(k){
       document.getElementById('m-'+k).setAttribute('aria-pressed', String(k===m));
     });
@@ -71,18 +79,30 @@
      silently, because the failure is swallowed. Volunteers rely on that sound
      in a noisy hall more than on the screen. */
   var audioCtx = null;
-  function beep(ok){
+  /* Three tones, not two.
+     Admitting and checking out used to sound identical — both 880 Hz — and the
+     beep is what a volunteer actually relies on, because by then they are looking
+     at the guest rather than the screen. A phone silently left in the wrong mode
+     therefore gave the same confirmation either way, and the mistake only
+     surfaced later as guests being refused re-entry.
+     admit 880 Hz short · exit 523 Hz twice · refuse 220 Hz long. */
+  function beep(kind){
     try{
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtx.state === 'suspended') audioCtx.resume();   // mobile suspends until a gesture
       var a = audioCtx;
-      var o = a.createOscillator(), g = a.createGain();
-      o.connect(g); g.connect(a.destination);
-      o.frequency.value = ok ? 880 : 220;
-      g.gain.setValueAtTime(.14, a.currentTime);
-      g.gain.exponentialRampToValueAtTime(.0001, a.currentTime + (ok?.16:.42));
-      o.start(); o.stop(a.currentTime + (ok?.18:.45));
-      o.onended = function(){ try { o.disconnect(); g.disconnect(); } catch(e){} };
+      function tone(freq, at, dur){
+        var o = a.createOscillator(), g = a.createGain();
+        o.connect(g); g.connect(a.destination);
+        o.frequency.value = freq;
+        g.gain.setValueAtTime(.14, a.currentTime + at);
+        g.gain.exponentialRampToValueAtTime(.0001, a.currentTime + at + dur);
+        o.start(a.currentTime + at); o.stop(a.currentTime + at + dur + .02);
+        o.onended = function(){ try { o.disconnect(); g.disconnect(); } catch(e){} };
+      }
+      if (kind === 'exit')      { tone(523, 0, .12); tone(523, .17, .12); }
+      else if (kind === 'admit') tone(880, 0, .16);
+      else                       tone(220, 0, .42);
     }catch(e){}
   }
 
@@ -107,8 +127,10 @@
     }
     busy = true;
     var ok = (res.status==='ALLOW'||res.status==='EXIT'||res.status==='INFO');
-    beep(ok);
-    if (navigator.vibrate) navigator.vibrate(ok?60:[90,70,90]);
+    beep(res.status==='EXIT' ? 'exit' : ok ? 'admit' : 'bad');
+    // Vibration follows the same three-way split, for a noisy hall.
+    if (navigator.vibrate) navigator.vibrate(
+      res.status==='EXIT' ? [50,60,50] : ok ? 60 : [90,70,90]);
 
     var box = document.getElementById('result');
     box.className = 'show bg-' + res.status;
@@ -752,7 +774,11 @@
   on('photoIn',  'change', function(){ scanPhoto(this); });
   on('photoBtn', 'click',  function(){ document.getElementById('photoIn').click(); });
 
-  setMode('IN');
+  /* Restore the mode chosen before the reload. Validated, because
+     sessionStorage is editable and MODE is sent straight to the server. */
+  var savedMode = '';
+  try { savedMode = sessionStorage.getItem('gatescanner_mode') || ''; } catch(e){}
+  setMode(/^(IN|OUT|CHECK)$/.test(savedMode) ? savedMode : 'IN');
   startCamera();          // starts right away, does not wait on sign-in
   try {
     initSignIn();
