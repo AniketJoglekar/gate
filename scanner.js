@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -37,15 +37,32 @@
 
   var busy = false, lastCode = '', lastAt = 0, scanner = null;
 
+  /* #hint had six independent writers with different lifetimes, and they
+     overwrote each other. The camera-failure message is the ONLY thing telling a
+     volunteer to use the photo fallback, and a routine double-read of one pass
+     replaced it and then blanked it — destroying the instruction that matters
+     most precisely when the camera is broken. Tapping a mode button did the same.
+
+     One owner now, with priorities: a transient warning beats a sticky failure
+     beats the mode instruction, and clearing a transient restores whatever
+     should be underneath rather than emptying the line. */
+  var HINT_MODE = '', HINT_STICKY = '';
+
+  function paintHint(transient){
+    var h = document.getElementById('hint');
+    if (h) h.textContent = transient || HINT_STICKY || HINT_MODE;
+  }
+
   function setMode(m){
     MODE = m;
     ['IN','OUT','CHECK'].forEach(function(k){
       document.getElementById('m-'+k).setAttribute('aria-pressed', String(k===m));
     });
-    document.getElementById('hint').textContent =
+    HINT_MODE =
       m==='IN' ? 'Point at the pass to admit' :
       m==='OUT'? 'Point at the pass to check out' :
                  'Point at the pass to view details';
+    paintHint();
   }
 
   /* One AudioContext, reused. Creating a new one per scan hits the browser's
@@ -69,16 +86,8 @@
     }catch(e){}
   }
 
-  /* Last verdict that actually came from the server. A transport failure carries
-     no occupancy figures, so without this there is no way to re-offer the extend
-     buttons — and re-offering them is the only route back for a volunteer whose
-     extend timed out. */
-  var lastGood = null;
-
   function show(res){
     clearPending();
-    if (!res._transport &&
-        (res.status === 'ALLOW' || res.status === 'EXIT')) lastGood = res;
     /* Any verdict from the server resolves the request: the next scan of this
        pass is a new person, not a retry. Only client-synthesised transport
        failures keep the key alive. */
@@ -502,12 +511,10 @@
         (now - lastAt < DUPE_WINDOW_MS || now - resumeAt < SAME_PASS_GRACE_MS)) {
       /* Say so. A silent block is exactly what made the old four-second window
          drop guests two and three with no indication anything had happened. */
-      var h = document.getElementById('hint');
-      if (h) h.textContent = 'Same pass still in view — move it away for the next one.';
+      paintHint('Same pass still in view — move it away for the next one.');
       return;
     }
-    var h2 = document.getElementById('hint');
-    if (h2 && h2.textContent.indexOf('Same pass') === 0) h2.textContent = '';
+    paintHint();          // restores the sticky or mode text, never blanks it
     lastCode = text; lastAt = now;
     if (scanner) { try { scanner.pause(true); } catch(e){} }
     send(text);
@@ -595,8 +602,8 @@
        level, so initSignIn() never runs and the volunteer gets a dead page
        instead of the working photo fallback. */
     if (typeof Html5Qrcode === 'undefined'){
-      document.getElementById('hint').textContent =
-        'Camera library did not load — use "Take photo of pass" below.';
+      HINT_STICKY = 'Camera library did not load — use "Take photo of pass" below.';
+      paintHint();
       return;
     }
     try {
@@ -607,26 +614,31 @@
         onScan,
         function(){}
       ).catch(function(){
-        document.getElementById('hint').textContent =
-          'Live camera blocked on this phone — use "Take photo of pass" below.';
+        HINT_STICKY = 'Live camera blocked on this phone — use "Take photo of pass" below.';
+        paintHint();
       });
     } catch (e) {
       scanner = null;
-      document.getElementById('hint').textContent =
-        'Camera unavailable — use "Take photo of pass" below.';
+      HINT_STICKY = 'Camera unavailable — use "Take photo of pass" below.';
+      paintHint();
     }
   }
 
   var SESSION_KEY = '';
 
-  function saveSession(key, name, nonce, role){
+  /* ts is passed through on restore so the client clock stays anchored to the
+     ORIGINAL sign-in. Rewriting it on every page load let the client's 5.5h
+     window drift arbitrarily past the server's fixed 6h session cache: reload at
+     hour five and the phone believed it was good until hour ten, then burned a
+     scan discovering otherwise at the gate. */
+  function saveSession(key, name, nonce, role, ts){
     SESSION_KEY = key;
     VOLKEY = key;
     NONCE = nonce || NONCE;
     ROLE = role || '';
     try {
       sessionStorage.setItem('gatescanner_session', JSON.stringify(
-        { key: key, name: name, nonce: NONCE, role: ROLE, ts: Date.now() }));
+        { key: key, name: name, nonce: NONCE, role: ROLE, ts: ts || Date.now() }));
     } catch(e){}
     applyRole();
     document.getElementById('vol').textContent = name;
@@ -695,7 +707,7 @@
     try { saved = JSON.parse(sessionStorage.getItem('gatescanner_session') || 'null'); } catch(e){}
     var restored = !!(saved && saved.key && saved.nonce &&
                       (Date.now() - saved.ts) < 5.5 * 3600 * 1000);
-    if (restored) saveSession(saved.key, saved.name, saved.nonce, saved.role);
+    if (restored) saveSession(saved.key, saved.name, saved.nonce, saved.role, saved.ts);
 
     // Show the overlay only if there is no session — but load Google's script
     // EITHER WAY. Returning early on a restored session left #gbtn empty, so
