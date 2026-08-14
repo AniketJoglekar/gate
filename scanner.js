@@ -9,8 +9,8 @@
      ------------------------------------------------------------------ */
   var NONCE = '', ROLE = '';
 
-  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
-  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+  var API_URL   = 'PASTE_YOUR_EXEC_URL_HERE';
+  var CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
 
 
   function qs(name){
@@ -525,6 +525,46 @@
     resumeAt = Date.now();
     if (scanner) { try { scanner.resume(); } catch(e){} }
   }
+
+  /* Mobile browsers throttle a backgrounded tab and suspend the camera when the
+     screen sleeps, often leaving the video element holding its LAST frame. The
+     decode loop keeps reading that element, so on wake a frozen frame containing
+     a pass is read again — admitting somebody who is not standing there, and
+     using up a slot the third guest on that pass will later be refused for.
+
+     The same-pass guard could not catch this: it measures from the camera
+     resuming, and from the app's point of view the camera never paused. Pausing
+     on hide and stamping resumeAt on wake puts the stale frame back inside the
+     grace window, by which time live frames have replaced it. */
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden){
+      if (scanner) { try { scanner.pause(true); } catch(e){} }
+      return;
+    }
+    if (busy) return;            // a result is still on screen — leave it for the volunteer
+    resumeAt = Date.now();
+    if (!scanner) return;
+    try {
+      scanner.resume();
+    } catch(e){
+      /* resume() throws for two very different reasons and this handler cannot
+         tell them apart:
+           - a long sleep ended the camera track (reloading fixes it), or
+           - the camera was never running because it is blocked, in which case
+             startCamera() has already set the accurate "use Take photo of pass"
+             message and reloading will not help at all.
+
+         An earlier version overwrote HINT_STICKY unconditionally with "reload
+         this page", so a volunteer with a blocked camera lost the one
+         instruction that worked and was sent to do something useless. Only
+         speak when nothing better has already been said, and offer both routes
+         rather than asserting a cause. */
+      if (!HINT_STICKY) {
+        HINT_STICKY = 'Camera stopped — reload this page, or use "Take photo of pass" below.';
+      }
+      paintHint();
+    }
+  });
 
   function onScan(text){
     var now = Date.now();
