@@ -1,185 +1,76 @@
-<!DOCTYPE html>
-<html>
-<head>
-<base target="_top">
-<meta charset="utf-8">
-<style>
-  :root{
-    --ink:#0B1220;      /* base */
-    --ink-2:#141E33;    /* raised */
-    --line:#2A3752;
-    --text:#EAF0FA;
-    --muted:#8B9BB8;
-    --admit:#12B76A;
-    --exit:#3B82F6;
-    --hold:#F79009;
-    --stop:#F04438;
-  }
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;height:100%}
-  body{
-    background:var(--ink);color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-    font-variant-numeric:tabular-nums;
-    display:flex;flex-direction:column;overflow:hidden;
+/* ------------------------------------------------------------------
+     CONFIGURATION — set these two once, here in the file.
+
+     They are deliberately NOT read from the URL. An earlier version took
+     them from the query string, which meant anyone could send a link that
+     pointed this page at their own server; because the transport below
+     loads the reply as a <script>, that was remote code execution on
+     whatever domain this file is hosted on.
+     ------------------------------------------------------------------ */
+  var NONCE = '', ROLE = '';
+
+  var API_URL   = 'https://script.google.com/macros/s/AKfycbw0zbmQFELcmo8tt5_4N_WKkUYUp5SYCaVXRPvqFANIfu-cHyeiBkVhPmSk6cqK9Y1J/exec';
+  var CLIENT_ID = '813055517806-v5m9c1ordrol7le2n14d9sk9hk8f1u5a.apps.googleusercontent.com';
+
+
+  function qs(name){
+    var m = location.search.match(new RegExp('[?&]' + name + '=([^&]+)'));
+    if (!m) return '';
+    try { return decodeURIComponent(m[1]); } catch (e) { return ''; }  // malformed % must not kill the page
   }
 
-  /* ---- header ---- */
-  header{padding:10px 14px 0;flex:0 0 auto}
-  .who{display:flex;justify-content:space-between;align-items:baseline;
-       font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-  .modes{display:flex;gap:6px;margin-top:10px;background:var(--ink-2);
-         border:1px solid var(--line);border-radius:14px;padding:4px}
-  .modes button{
-    flex:1;border:0;background:transparent;color:var(--muted);
-    font:600 15px/1 inherit;letter-spacing:.04em;padding:13px 0;border-radius:10px;cursor:pointer}
-  .modes button[aria-pressed="true"]{background:var(--text);color:var(--ink)}
-  .modes button:focus-visible{outline:2px solid var(--exit);outline-offset:2px}
+  // Only honoured when sign-in is NOT configured. With sign-in on, identity comes
+  // from Google, and reading a key from the URL would let a crafted link seed a
+  // bogus value that suppresses the sign-in prompt.
+  var VOLKEY = CLIENT_ID ? '' : qs('k').toUpperCase();
 
-  /* ---- camera ---- */
-  main{flex:1 1 auto;position:relative;margin:12px 14px;border-radius:18px;
-       overflow:hidden;background:#000;border:1px solid var(--line)}
-  #reader{width:100%;height:100%}
-  #reader video{width:100%!important;height:100%!important;object-fit:cover}
-  .hint{position:absolute;inset:auto 0 0 0;padding:10px;text-align:center;
-        font-size:13px;color:var(--muted);background:linear-gradient(transparent,rgba(11,18,32,.9))}
+  if (API_URL.indexOf('PASTE_') === 0 || CLIENT_ID.indexOf('PASTE_') === 0) {
+    document.body.textContent =
+      'This page is not configured. Open scanner.js and set API_URL and CLIENT_ID '
+      + '(lines 12-13), and replace AKfycbXXXX in the index.html CSP with your '
+      + 'deployment id.';
+    document.body.style.cssText = 'font:15px sans-serif;color:#900;padding:20px';
+    throw new Error('unconfigured');
+  }
 
-  /* ---- result flood ---- */
-  #result{position:fixed;inset:0;z-index:20;display:none;
-          flex-direction:column;justify-content:center;padding:28px;color:#04140C}
-  #result.show{display:flex;animation:pop .14s ease-out}
-  @keyframes pop{from{opacity:0;transform:scale(.98)}to{opacity:1;transform:none}}
-  #result .verdict{font:800 14px/1 inherit;letter-spacing:.22em;text-transform:uppercase;opacity:.7}
-  #result .headline{font:800 clamp(34px,10vw,60px)/1.02 inherit;margin:10px 0 4px;word-break:break-word}
-  #result .roll{font:600 clamp(17px,5vw,24px)/1.3 inherit;opacity:.75}
-  #result .detail{font:500 17px/1.4 inherit;margin-top:16px;opacity:.85}
-  #result .actions{display:flex;gap:10px;margin-top:22px}
-  #result .actions:empty{display:none}
-  #result .actions button{flex:1;border:2px solid currentColor;border-radius:14px;
-    padding:18px 0;background:rgba(255,255,255,.5);color:inherit;
-    font:800 17px/1 inherit;cursor:pointer}
-  #result .tapaway{margin-top:auto;font:600 13px/1 inherit;letter-spacing:.1em;
-                   text-transform:uppercase;opacity:.55;text-align:center}
-
-  /* signature: capacity pips */
-  .pips{display:flex;gap:10px;margin-top:22px}
-  .pip{width:40px;height:40px;border-radius:50%;border:3px solid currentColor}
-  .pip.on{background:currentColor}
-
-  .bg-ALLOW{background:var(--admit)}
-  .bg-EXIT{background:var(--exit);color:#03102A}
-  .bg-FULL,.bg-WARN{background:var(--hold)}
-  .bg-INVALID,.bg-BLOCKED,.bg-DENIED{background:var(--stop);color:#2A0505}
-  .bg-INFO{background:var(--text);color:var(--ink)}
-
-  /* ---- manual ---- */
-  footer{flex:0 0 auto;padding:0 14px 14px}
-  details summary{list-style:none;cursor:pointer;font-size:13px;color:var(--muted);
-                  padding:8px 0;letter-spacing:.04em}
-  details summary::-webkit-details-marker{display:none}
-  .manual{display:flex;gap:8px}
-  .manual input{flex:1;background:var(--ink-2);border:1px solid var(--line);
-    border-radius:12px;color:var(--text);font:600 17px inherit;padding:13px;min-width:0}
-  .manual button{background:var(--text);color:var(--ink);border:0;border-radius:12px;
-    font:700 15px inherit;padding:0 18px;cursor:pointer}
-  .err{color:var(--hold);font-size:13px;padding:6px 0}
-  #photoBtn{display:block;width:100%;margin-bottom:10px;background:var(--ink-2);color:var(--text);
-    border:1px solid var(--line);border-radius:14px;font:600 15px/1 inherit;padding:14px 0;cursor:pointer}
-  @media (prefers-reduced-motion:reduce){#result.show{animation:none}}
-
-  #signin{position:fixed;inset:0;z-index:30;background:var(--ink);
-    display:none;flex-direction:column;align-items:center;justify-content:center;
-    padding:32px;text-align:center;gap:16px}
-  #signin.show{display:flex}
-  #signin h1{font:800 22px/1.3 inherit;margin:0}
-  #signin p{font:400 14px/1.5 inherit;color:var(--muted);margin:0;max-width:320px}
-  #signin .denied{color:var(--stop);font:600 14px/1.4 inherit;max-width:320px}
-  #signout{display:none;background:transparent;color:var(--muted);
-    border:1px solid var(--line);border-radius:8px;
-    font:600 10px/1 inherit;letter-spacing:.03em;padding:5px 8px;
-    cursor:pointer;flex:0 0 auto;white-space:nowrap}
-  .who{gap:10px}
-  .who #vol{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
-</style>
-</head>
-<body>
-
-<header>
-  <div class="who">
-    <span>Gate scanner</span>
-    <span style="display:flex;align-items:center;gap:8px;min-width:0">
-      <span id="vol"><?= volunteer ?></span>
-      <button id="signout" onclick="signOut()">Switch</button>
-    </span>
-  </div>
-  <div class="modes" role="group" aria-label="Scan mode">
-    <button id="m-IN"    aria-pressed="true"  onclick="setMode('IN')">Entry</button>
-    <button id="m-OUT"   aria-pressed="false" onclick="setMode('OUT')">Exit</button>
-    <button id="m-CHECK" aria-pressed="false" onclick="setMode('CHECK')">Look up</button>
-  </div>
-</header>
-
-<main>
-  <div id="reader"></div>
-  <div class="hint" id="hint">Point at the pass</div>
-</main>
-
-<footer>
-  <button id="photoBtn" onclick="document.getElementById('photoIn').click()">📷 Take photo of pass (if camera above will not scan)</button>
-  <input type="file" id="photoIn" accept="image/*" capture="environment"
-         style="display:none" onchange="scanPhoto(this)">
-  <details id="manualBox" style="display:none">
-    <summary>Pass damaged? Type the Pass ID</summary>
-    <div class="manual">
-      <input id="manualId" placeholder="P0001" autocapitalize="characters" autocomplete="off">
-      <button onclick="sendManual()">Go</button>
-    </div>
-  </details>
-  <div class="err" id="err"></div>
-</footer>
-
-<div id="signin">
-  <h1>Volunteer sign-in</h1>
-  <p>Sign in with the Google account your coordinator registered for you.</p>
-  <div id="gbtn"></div>
-  <p id="signinWait" style="display:none;color:var(--text);font:600 15px/1.4 inherit">
-    Verifying your account…<br>
-    <span style="color:var(--muted);font-weight:400;font-size:13px">
-      This can take up to 30 seconds. Please don't tap again.</span>
-  </p>
-  <p class="denied" id="signinErr"></p>
-</div>
-
-<div id="result" onclick="dismiss()">
-  <div class="verdict" id="r-verdict"></div>
-  <div class="headline" id="r-headline"></div>
-  <div class="roll" id="r-roll"></div>
-  <div class="pips" id="r-pips"></div>
-  <div class="detail" id="r-detail"></div>
-  <div class="actions" id="r-actions"></div>
-  <div class="tapaway">Tap to scan the next pass</div>
-</div>
-
-<!-- NOTE: this page is now served only in key mode (see doGet). If you expect to
-     rely on that degraded mode, consider inlining these two libraries — an
-     external CDN is exactly what you cannot count on if the reason you are in
-     degraded mode is a network problem. -->
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
-<script>
   var MODE = 'IN';
-  var VOLKEY = <?!= JSON.stringify(volKey) ?>;
+
   var busy = false, lastCode = '', lastAt = 0, scanner = null;
+
+  /* #hint had six independent writers with different lifetimes, and they
+     overwrote each other. The camera-failure message is the ONLY thing telling a
+     volunteer to use the photo fallback, and a routine double-read of one pass
+     replaced it and then blanked it — destroying the instruction that matters
+     most precisely when the camera is broken. Tapping a mode button did the same.
+
+     One owner now, with priorities: a transient warning beats a sticky failure
+     beats the mode instruction, and clearing a transient restores whatever
+     should be underneath rather than emptying the line. */
+  var HINT_MODE = '', HINT_STICKY = '';
+
+  function paintHint(transient){
+    var h = document.getElementById('hint');
+    if (h) h.textContent = transient || HINT_STICKY || HINT_MODE;
+  }
 
   function setMode(m){
     MODE = m;
+    /* Persist across reloads. Without this every page load silently reverted to
+       Entry — so an exit gate that reloaded (battery swap, crash, an accidental
+       pull-to-refresh, iOS reclaiming a backgrounded tab) began ADMITTING
+       departing guests. Occupancy climbs, and the family is refused on return.
+       Nothing on screen says "wrong mode"; the volunteer sees a normal success.
+       sessionStorage clears when the tab closes, so a phone reassigned to a
+       different gate still starts clean. */
+    try { sessionStorage.setItem('gatescanner_mode', m); } catch(e){}
     ['IN','OUT','CHECK'].forEach(function(k){
       document.getElementById('m-'+k).setAttribute('aria-pressed', String(k===m));
     });
-    document.getElementById('hint').textContent =
+    HINT_MODE =
       m==='IN' ? 'Point at the pass to admit' :
       m==='OUT'? 'Point at the pass to check out' :
                  'Point at the pass to view details';
+    paintHint();
   }
 
   /* One AudioContext, reused. Creating a new one per scan hits the browser's
@@ -188,39 +79,58 @@
      silently, because the failure is swallowed. Volunteers rely on that sound
      in a noisy hall more than on the screen. */
   var audioCtx = null;
-  function beep(ok){
+  /* Three tones, not two.
+     Admitting and checking out used to sound identical — both 880 Hz — and the
+     beep is what a volunteer actually relies on, because by then they are looking
+     at the guest rather than the screen. A phone silently left in the wrong mode
+     therefore gave the same confirmation either way, and the mistake only
+     surfaced later as guests being refused re-entry.
+     admit 880 Hz short · exit 523 Hz twice · refuse 220 Hz long. */
+  function beep(kind){
     try{
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtx.state === 'suspended') audioCtx.resume();   // mobile suspends until a gesture
       var a = audioCtx;
-      var o = a.createOscillator(), g = a.createGain();
-      o.connect(g); g.connect(a.destination);
-      o.frequency.value = ok ? 880 : 220;
-      g.gain.setValueAtTime(.14, a.currentTime);
-      g.gain.exponentialRampToValueAtTime(.0001, a.currentTime + (ok?.16:.42));
-      o.start(); o.stop(a.currentTime + (ok?.18:.45));
-      o.onended = function(){ try { o.disconnect(); g.disconnect(); } catch(e){} };
+      function tone(freq, at, dur){
+        var o = a.createOscillator(), g = a.createGain();
+        o.connect(g); g.connect(a.destination);
+        o.frequency.value = freq;
+        g.gain.setValueAtTime(.14, a.currentTime + at);
+        g.gain.exponentialRampToValueAtTime(.0001, a.currentTime + at + dur);
+        o.start(a.currentTime + at); o.stop(a.currentTime + at + dur + .02);
+        o.onended = function(){ try { o.disconnect(); g.disconnect(); } catch(e){} };
+      }
+      if (kind === 'exit')      { tone(523, 0, .12); tone(523, .17, .12); }
+      else if (kind === 'admit') tone(880, 0, .16);
+      else                       tone(220, 0, .42);
     }catch(e){}
   }
 
   function show(res){
     clearPending();
+    /* Any verdict from the server resolves the request: the next scan of this
+       pass is a new person, not a retry. Only client-synthesised transport
+       failures keep the key alive. */
+    if (!res._transport) { clearRid(); failedRequest = null; }
     if (res.status === 'DENIED' && CLIENT_ID){
-      // Only ignore a rejection belonging to a session we have since replaced.
-      // Checking "is VOLKEY set" was wrong: it is true both before and after
-      // sign-in, so an expired session swallowed every rejection silently.
+      // Only ignore a rejection that belongs to a session we have since replaced.
+      // Previously this checked "is VOLKEY set", which was true both before and
+      // after sign-in, so an expired session silently swallowed every rejection
+      // and the volunteer never saw the sign-in screen again.
       if (res._staleSession) { releaseScanner(); return; }
       clearSession();
       resetSignInUi();
       document.getElementById('signinErr').textContent = res.detail || res.headline || '';
       document.getElementById('signin').className = 'show';
-      releaseScanner();
+      releaseScanner();          // path 3: session expired — camera must come back
       return;
     }
     busy = true;
     var ok = (res.status==='ALLOW'||res.status==='EXIT'||res.status==='INFO');
-    beep(ok);
-    if (navigator.vibrate) navigator.vibrate(ok?60:[90,70,90]);
+    beep(res.status==='EXIT' ? 'exit' : ok ? 'admit' : 'bad');
+    // Vibration follows the same three-way split, for a noisy hall.
+    if (navigator.vibrate) navigator.vibrate(
+      res.status==='EXIT' ? [50,60,50] : ok ? 60 : [90,70,90]);
 
     var box = document.getElementById('result');
     box.className = 'show bg-' + res.status;
@@ -237,7 +147,103 @@
     for (var i = 1; i <= cap; i++) pips += '<div class="pip' + (i <= res.inside ? ' on' : '') + '"></div>';
     document.getElementById('r-pips').innerHTML = pips;
 
-    document.getElementById('r-actions').innerHTML = '';
+    renderActions(res);
+  }
+
+  /* Group-admit buttons. #r-actions was present and styled but always emptied —
+     a dead affordance sitting exactly where these belong.
+
+     The counts offered come from the server's own occupancy figure, so the UI
+     cannot propose more than is available. The server clamp is the backstop,
+     not the control. */
+  function renderActions(res){
+    var box = document.getElementById('r-actions');
+    box.innerHTML = '';
+    if (!lastRequest) return;
+
+    /* Transport failure. The response carries no occupancy, so fall back to the
+       last real verdict and re-offer the same buttons — retrying is safe because
+       the key is derived from the extend's parameters, so a request that did
+       reach the server returns its cached result rather than admitting again. */
+    /* Transport failure: exactly one correct action, which is resending the
+       request that failed. Offering a menu of counts here was wrong — after a
+       failed +1, a "Retry +2" is a DIFFERENT request the server has no reason to
+       deduplicate, so tapping it would admit again on top of the first. */
+    if (res._transport){
+      if (failedRequest){
+        var rb = document.createElement('button');
+        rb.type = 'button';
+        rb.textContent = 'Retry';
+        rb.addEventListener('click', function(ev){
+          ev.stopPropagation();
+          rb.disabled = true;
+          retryFailed();
+        });
+        box.appendChild(rb);
+        document.getElementById('r-detail').textContent =
+          'No reply from the server. Tap Retry above — do NOT scan the pass again.';
+      }
+      addDiagnostics(box);
+      return;
+    }
+    if (res.status !== 'ALLOW' && res.status !== 'EXIT') return;
+
+    var free, action, verb;
+    if (res.status === 'ALLOW'){
+      free = Math.max(0, (Number(res.capacity) || 0) - (Number(res.inside) || 0));
+      action = 'IN';  verb = 'more in';
+    } else if (res.status === 'EXIT'){
+      free = Math.max(0, Number(res.inside) || 0);
+      action = 'OUT'; verb = 'more out';
+    } else {
+      return;                                  // nothing to extend from
+    }
+    if (free < 1) return;
+
+    for (var i = 1; i <= Math.min(free, 4); i++){
+      (function(n){
+        var b = document.createElement('button');
+        b.type = 'button';
+        /* In recovery the label must not read like a fresh action. Retrying via
+           this button reuses the idempotency key and is safe; rescanning the pass
+           instead generates a new key and, if the lost request had actually
+           succeeded, consumes a second slot for someone already counted. The
+           volunteer has no way to know that, so the UI has to say it. */
+        b.textContent = '+' + n + ' ' + verb;
+        b.addEventListener('click', function(ev){
+          /* The overlay itself dismisses on click. Without this the tap would
+             both extend and close the result. */
+          ev.stopPropagation();
+          /* Disable on first tap: a double-tap sends two calls with different
+             rids, which the server correctly treats as two real requests. The
+             clamp stops over-admission, but pips jumping 1 -> 2 -> 3 in front of
+             a volunteer does not inspire confidence. */
+          var all = box.querySelectorAll('button');
+          for (var j = 0; j < all.length; j++) all[j].disabled = true;
+          extend(action, n);
+        });
+        box.appendChild(b);
+      })(i);
+    }
+  }
+
+  function addDiagnostics(box){
+    if (!LAST_FAIL_URL) return;
+    var d = document.createElement('button');
+    d.type = 'button';
+    d.textContent = 'Diagnostics';
+    d.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      /* Must write INSIDE the overlay. This previously targeted #err, which sits
+         outside #result — and #result is position:fixed inset:0 z-index:20, so
+         the text rendered behind a full-screen panel. Field report: "the
+         diagnostics button didn't do anything." It did; nobody could see it. */
+      var e = document.getElementById('r-detail');
+      e.style.wordBreak = 'break-all';
+      e.style.fontSize = '12px';
+      e.textContent = LAST_FAIL_URL;
+    });
+    box.appendChild(d);
   }
 
   var pending = false, pendingTimer = null;
@@ -258,7 +264,10 @@
     pendingTimer = setInterval(function(){
       var s = Math.round((Date.now() - t0) / 1000);
       det.textContent = s < 4 ? 'Looking up the pass\u2026'
-        : 'Still working \u2014 ' + s + 's. Do not scan again yet.';
+        /* Was "Do not scan again yet", which contradicted the timeout message
+           telling the volunteer to rescan. Rescanning is safe: ridFor() keeps
+           the idempotency key alive through a transport failure. */
+        : 'Still working \u2014 ' + s + 's.';
     }, 500);
   }
 
@@ -268,100 +277,299 @@
     pendingTimer = null;
   }
 
-  /* onScan() pauses the camera before every request. Every route out of that
-     request must return through here, or the camera stays paused and the
-     scanner silently stops working with nothing on screen to explain it. */
-  /* Declared above its first use rather than relying on var hoisting: it is
-     assigned in releaseScanner/dismiss below and read in onScan further down,
-     and a reader should not have to reason about load order to see that. */
-  var resumeAt = 0;
-
+  /* onScan() pauses the camera before every request. EVERY route out of that
+     request must come back through here, or the camera stays paused and the
+     scanner silently stops working with no error on screen. */
   function releaseScanner(){
     pending = false;
     clearInterval(pendingTimer);
     pendingTimer = null;
     busy = false;
     document.getElementById('result').className = '';
-    resumeAt = Date.now();
-    if (scanner) { try { scanner.resume(); } catch(e){} }
+    resumeScanner_();
   }
 
   function dismiss(){
     if (pending) return;              // ignore taps while waiting for the server
     document.getElementById('result').className = '';
     busy = false;
-    resumeAt = Date.now();
-    if (scanner) { try { scanner.resume(); } catch(e){} }
+    resumeScanner_();
   }
 
+  function newRid(){
+    return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  }
+
+  /* An idempotency key belongs to an unresolved REQUEST, not to an attempt.
+     If a scan fails in transport, the next scan of that same pass is almost
+     certainly the volunteer retrying — so it reuses the key and the server
+     collapses the pair. Once any definitive verdict arrives the key is cleared,
+     so the next scan of the same pass is a genuinely new person and counts.
+
+     Bounded to 60s: the server's idempotency cache lives 300s, and beyond a
+     minute a rescan is far more likely to be a real second guest than a retry. */
+  var pendingRid = null, pendingCode = null, pendingAt = 0;
+
+  function ridFor(code){
+    if (code === pendingCode && pendingRid && (Date.now() - pendingAt) < 60000) {
+      return pendingRid;
+    }
+    pendingCode = code; pendingRid = newRid(); pendingAt = Date.now();
+    return pendingRid;
+  }
+
+  function clearRid(){ pendingCode = null; pendingRid = null; pendingAt = 0; }
+
+  /* Last URL that failed at transport level. Exposed on the page so a fault can
+     be read off the phone itself rather than needing a tethered debugger. */
+  var LAST_FAIL_URL = '';
+
+  /* The exact params of the last request that failed in transport. Retrying
+     means resending THIS, not building something similar. */
+  var failedRequest = null;
+
+  function retryFailed(){
+    if (!failedRequest) return;
+    showPending();
+    api(failedRequest, show);
+  }
+
+  function api(params, cb, timeoutMs, _isRetry){
+    var sentUnder = VOLKEY;          // used to spot replies for a superseded session
+    var name = 'jp' + Date.now() + Math.floor(Math.random()*1000);
+    var s = document.createElement('script');
+    var done = false;
+
+    /* Retry ONLY an instant failure, never a timeout.
+       A timeout means the server is slow — retrying then doubles load on an
+       already-struggling service, and because every gate times out together the
+       retries arrive together too. A timeout now needs no automatic retry
+       anyway: ridFor() keeps the idempotency key alive after a transport
+       failure, so the volunteer simply scanning the pass again is deduplicated
+       server-side. That keeps a human in the loop and applies natural
+       backpressure, which an automatic retry removes. */
+    function retryOrFail(res, wasTimeout){
+      if (!_isRetry && !wasTimeout && params.rid){
+        setTimeout(function(){ api(params, cb, timeoutMs, true); },
+                   1200 + Math.floor(Math.random() * 1600));
+        return;
+      }
+      /* Keep the EXACT request that failed, rid included, so a manual retry can
+         resend it byte for byte. Deriving a key from a heuristic and a time
+         window did not survive contact with reality: recovering from a dropped
+         connection takes longer than any window worth allowing, so the key had
+         expired by the time the volunteer tapped Retry and the server counted a
+         second admission. */
+      if (res && res._transport && params.rid) failedRequest = params;
+      cb(res);
+    }
+
+    /* 8s per attempt, not 15. With one automatic retry the volunteer's worst
+       case is ~16s rather than ~30s — and at a gate running one person every
+       eleven seconds, 30s of frozen camera is three people of dead air.
+       Sign-in passes its own 60000 and is unaffected. */
+    /* 15s, matching the server's LockService.waitLock(15000).
+       This was briefly 8s, which was shorter than the server's own lock wait —
+       so the client abandoned requests the server was still legitimately
+       processing, then fired a retry onto the same slow execution. Apps Script
+       cold starts alone routinely exceed 8 seconds. A client timeout must never
+       be shorter than the server is willing to wait. */
+    /* Set for the timeout path too. Previously only s.onerror set it, so a
+       timeout either showed no Diagnostics button or — worse — showed a stale
+       URL from an earlier, unrelated failure. A diagnostic that lies is worse
+       than none. */
+    var timer = setTimeout(function(){ LAST_FAIL_URL = s.src;
+      finish({ status:'INVALID', _transport:true,
+      headline:'Server is taking too long',
+      detail:'No reply. If a Retry button is shown, use it rather than rescanning.' },
+      true, true); },
+      timeoutMs || 15000);
+
+    function finish(res, retryable, wasTimeout){
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      /* Leave a no-op behind rather than deleting the name. A response that
+         lands after we gave up would otherwise execute jpNNN(...) against a
+         missing global and throw an uncaught ReferenceError — console noise
+         during exactly the stall someone would be debugging. */
+      window[name] = function(){};
+      setTimeout(function(){ try { delete window[name]; } catch(e){ window[name] = undefined; } }, 30000);
+      if (s.parentNode) s.parentNode.removeChild(s);
+      if (res && typeof res === 'object') res._staleSession = (sentUnder !== VOLKEY);
+      if (retryable) retryOrFail(res || { status:'INVALID', headline:'Bad reply from the server' }, wasTimeout);
+      else cb(res || { status:'INVALID', headline:'Bad reply from the server' });
+    }
+
+    window[name] = function(res){ finish(res, false); };
+    params.callback = name;
+    params.k = VOLKEY;
+    params.n = NONCE;
+    var q = Object.keys(params).map(function(key){
+      return encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
+    }).join('&');
+    s.src = API_URL + '?' + q;
+    s.onerror = function(){
+      /* onerror fires for a refused request or an HTTP error status — never for
+         a bad response body. Several causes look identical from here (no signal,
+         CSP refusal, HTTP 4xx/5xx from Google), so this must NOT assert one of
+         them: an earlier version blamed the CSP and sent a correctly-configured
+         deployment chasing its own key for an unrelated fault.
+
+         The failing URL is stashed so LAST_FAIL_URL can be read from the page
+         without a laptop and a remote debugger. */
+      LAST_FAIL_URL = s.src;
+      try { console.error('gate: request failed: ' + s.src); } catch(e){}
+      finish({ status:'INVALID', _transport:true, headline:'Could not reach the server',
+        detail:'The request was refused before the server answered. Tap "Diagnostics" '
+             + 'below for the failing address.' },
+        true);
+    };
+    document.body.appendChild(s);
+  }
+
+  /* What to re-send when the volunteer extends an admission. lastCode cannot be
+     reused: it is the duplicate-suppression state below and gets cleared. */
+  var lastRequest = null;    // { api:'scan', t:code } or { api:'manual', id:v }
+
   function send(code){
-    var sentUnder = VOLKEY;
     if (CLIENT_ID && !VOLKEY){
       resetSignInUi();
       document.getElementById('signin').className = 'show';
-      releaseScanner();          // unwind: do not strand the paused camera
+      releaseScanner();          // not signed in yet: unwind, do not strand the camera
       return;
     }
     document.getElementById('err').textContent = '';
+    lastRequest = { api:'scan', t:code };
     showPending();
-    google.script.run
-      .withSuccessHandler(function(res){ res._staleSession = (sentUnder !== VOLKEY); show(res); })
-      .withFailureHandler(function(){
-        /* Previously this set busy=false and stopped. pending stayed true, the
-           timer kept running, the overlay stayed frozen on "Checking", and
-           dismiss() early-returns while pending — so the phone was dead until
-           reload. Routing through show() clears pending and gives the volunteer
-           something to tap. */
-        show({ status:'INVALID', headline:'Could not reach the server',
-               detail:'Check the signal and scan again.' });
-      })
-      .processScan(code, MODE, VOLKEY, NONCE, null, null);
+    api({ api:'scan', t:code, action:MODE, rid:ridFor(code) }, show);
   }
 
   function sendManual(){
     var v = document.getElementById('manualId').value;
     if(!v) return;
     document.getElementById('manualId').value = '';
-    var sentUnderManual = VOLKEY;
+    lastRequest = { api:'manual', id:v };
     showPending();
-    google.script.run
-      .withSuccessHandler(function(res){
-        if (res && typeof res === 'object') res._staleSession = (sentUnderManual !== VOLKEY);
-        show(res);
-      })
-      .withFailureHandler(function(){
-        show({ status:'INVALID', headline:'Could not reach the server',
-               detail:'Check the signal and try again.' });
-      })
-      .processManual(v, MODE, VOLKEY, NONCE, null, null);
+    api({ api:'manual', id:v, action:MODE, rid:ridFor('M:' + v) }, show);
   }
 
-  /* 700 ms, not 4000 — see scanner.js. The old window silently discarded
-     guests two and three on the same pass. */
-  /* See scanner.js: the grace period is measured from the camera RESUMING, not
-     from the last decode, so a pass still in front of the lens after a dismissal
-     is not read again immediately. */
+  /* Group admit: one more round trip instead of one more full scan cycle.
+     A family of three costs one decode, one identity check and one dismiss
+     rather than three of each — and two lock acquisitions on the server
+     rather than three. */
+  function extend(action, n){
+    if (!lastRequest) return;
+    /* Same guard as send(). A session that expired between the scan and this tap
+       would otherwise fire a call with an empty key, get DENIED, and drop the
+       volunteer at the sign-in screen mid-party with nothing explaining why. */
+    if (CLIENT_ID && !VOLKEY){
+      resetSignInUi();
+      document.getElementById('signin').className = 'show';
+      releaseScanner();
+      return;
+    }
+    /* Copy: api() mutates the object it is given (callback, k, n), and
+       lastRequest must stay clean for a second extend. */
+    var params = {};
+    for (var key in lastRequest) params[key] = lastRequest[key];
+    params.action = action;
+    /* Named 'cnt', not 'c'. A single generic letter in a query string to Google
+       infrastructure is a needless gamble against reserved or filtered names,
+       and this parameter failed deterministically as 'c' in field testing while
+       every other parameter on the same request went through. */
+    params.cnt    = n;
+    /* A key derived from the extend's own parameters, NOT a fresh one.
+       An earlier version used newRid() on the reasoning that an extend is a new
+       admission and must not be swallowed as a retry of the scan. True, but it
+       stopped one step short: the key must be new relative to the SCAN and
+       stable relative to THIS extend.
+
+       With a fresh key, a timed-out extend that actually succeeded could not be
+       safely repeated. The volunteer's only recourse was to rescan the pass,
+       which generated another new key and consumed a second slot for a person
+       already counted — leaving a phantom occupant and refusing the third real
+       guest. The clamp prevents exceeding capacity; it does not prevent wasting
+       a slot, and at capacity 3 one wasted slot is a third of the pass. */
+    /* Still keyed on the extend's own parameters so an immediate repeat dedupes,
+       but recovery no longer depends on this: a transport failure stashes the
+       whole request and the Retry button resends it with this same rid however
+       long the volunteer takes. */
+    params.rid = ridFor('X:' + (lastRequest.t || lastRequest.id) + ':' + action + ':' + n);
+    showPending();
+    api(params, show);
+  }
+
+  /* 700 ms, not 4000. This only needs to outlast the duplicate frames the
+     decoder emits between a successful read and busy/pause taking effect —
+     which is milliseconds. The old four-second window silently discarded
+     guests two and three on the same pass, and with three-per-pass that is the
+     ordinary case, not an edge case. The failure was invisible: no beep, no
+     overlay, the camera simply looked frozen. */
+  /* Two different jobs, two different clocks.
+
+     DUPE_WINDOW_MS covers the handful of duplicate frames the decoder emits
+     between a successful read and busy/pause taking effect — milliseconds.
+
+     SAME_PASS_GRACE_MS covers the pass still physically in front of the lens
+     when the camera resumes after a dismissal. That is measured from the RESUME,
+     not from the last decode: an interaction can run thirty seconds or more
+     (timeout, retry, result, dismiss), by which point a window measured from the
+     decode has long expired. The same pass is then read again immediately, and
+     again after that, and the volunteer cannot move on to the next guest. */
   var DUPE_WINDOW_MS = 700;
   var SAME_PASS_GRACE_MS = 2500;
+  var resumeAt = 0;
 
-  /* See scanner.js: a suspended tab can leave a frozen frame that gets decoded
-     again on wake, admitting somebody who is not there. */
-  /* Restart, not resume: backgrounding can end the camera track, and resume()
-     only un-pauses a video element that then has no live stream behind it. */
+  /* Set when the page was hidden while a result was on screen, so the camera
+     could not be restarted at that moment. dismiss() picks it up. */
+  var needsRestart = false;
+
+  /* A full stop-and-start, NOT resume().
+
+     Backgrounding a mobile browser frequently ends or mutes the camera track
+     outright. resume() only un-pauses the video element — with no live stream
+     behind it you get a frozen frame and the library's own "Scanner paused"
+     overlay, which is exactly what an earlier version of this handler produced:
+     the scanner died after every app switch, which is far worse than the stale
+     frame it was meant to prevent. A dead track can only be replaced. */
   function restartCamera_(){
     resumeAt = Date.now();
     if (!scanner) { startCamera(); return; }
-    var old = scanner; scanner = null;
+    var old = scanner;
+    scanner = null;                 // stop onScan firing during the gap
     var again = function(){ startCamera(); };
     try { old.stop().then(again, again); } catch(e){ again(); }
   }
 
+  function resumeScanner_(){
+    resumeAt = Date.now();
+    if (needsRestart) { needsRestart = false; restartCamera_(); return; }
+    if (scanner) { try { scanner.resume(); } catch(e){} }
+  }
+
+  /* Mobile browsers throttle a backgrounded tab and suspend the camera when the
+     screen sleeps, often leaving the video element holding its LAST frame. The
+     decode loop keeps reading that element, so on wake a frozen frame containing
+     a pass is read again — admitting somebody who is not standing there, and
+     using up a slot the third guest on that pass will later be refused for.
+
+     The same-pass guard cannot catch it: that guard measures from the camera
+     resuming, and from the app's point of view the camera never paused. */
   document.addEventListener('visibilitychange', function(){
     if (document.hidden){
+      /* Stop decoding immediately, so a frozen frame cannot be read in the
+         moment of waking before the restart below has run. */
       if (scanner) { try { scanner.pause(true); } catch(e){} }
       return;
     }
-    if (busy) return;
+    if (busy) {
+      /* A result is still on screen — the volunteer needs to act on it, and
+         tearing the camera down underneath them would be jarring. Defer it;
+         dismiss() will call resumeScanner_(), which honours needsRestart. */
+      needsRestart = true;
+      return;
+    }
     restartCamera_();
   });
 
@@ -369,7 +577,13 @@
     var now = Date.now();
     if (busy) return;
     if (text === lastCode &&
-        (now - lastAt < DUPE_WINDOW_MS || now - resumeAt < SAME_PASS_GRACE_MS)) return;
+        (now - lastAt < DUPE_WINDOW_MS || now - resumeAt < SAME_PASS_GRACE_MS)) {
+      /* Say so. A silent block is exactly what made the old four-second window
+         drop guests two and three with no indication anything had happened. */
+      paintHint('Same pass still in view — move it away for the next one.');
+      return;
+    }
+    paintHint();          // restores the sticky or mode text, never blanks it
     lastCode = text; lastAt = now;
     if (scanner) { try { scanner.pause(true); } catch(e){} }
     send(text);
@@ -402,58 +616,103 @@
 
   var ATTEMPTS = [[1000,false],[1500,false],[700,false],[1000,true],[1600,true],[500,false]];
 
+  /* jsQR is 252 KB and serves only the photo fallback, which is used rarely.
+     Loading it on demand halves the initial page weight on gate wifi.
+     script-src 'self' already permits this; no CSP change needed. */
+  var jsqrLoading = null;
+  function ensureJsQR(){
+    if (typeof jsQR !== 'undefined') return Promise.resolve(true);
+    if (jsqrLoading) return jsqrLoading;
+    jsqrLoading = new Promise(function(res){
+      var el = document.createElement('script');
+      el.src = 'jsQR.js';
+      el.onload  = function(){ res(typeof jsQR !== 'undefined'); };
+      el.onerror = function(){ res(false); };
+      document.head.appendChild(el);
+    });
+    return jsqrLoading;
+  }
+
   function scanPhoto(input){
     var f = input.files && input.files[0];
     if(!f) return;
-    if (typeof jsQR === 'undefined'){
-      document.getElementById('err').textContent =
-        'Decoder did not load. Check the phone has internet, then reload this page.';
-      return;
-    }
-    input.value = '';
     var err = document.getElementById('err');
-    err.textContent = 'Reading photo\u2026';
-    loadImage_(f).then(function(img){
-      for (var i = 0; i < ATTEMPTS.length; i++){
-        var text = null;
-        try { text = tryDecode_(img, ATTEMPTS[i][0], ATTEMPTS[i][1]); } catch(e){}
-        if (text){
-          err.textContent = '';
-          lastCode = ''; busy = false;
-          send(text);
-          return;
-        }
+    err.textContent = 'Loading decoder\u2026';
+    ensureJsQR().then(function(ready){
+      if (!ready){
+        err.textContent = 'Decoder did not load. Check the phone has internet, '
+                        + 'then reload this page.';
+        return;
       }
-      err.textContent = 'No QR found in that photo. Move closer so the code fills '
-                      + 'most of the frame, hold the phone flat, and keep it steady.';
-    }).catch(function(){
-      err.textContent = 'Could not open that photo. Try again.';
+      input.value = '';
+      err.textContent = 'Reading photo\u2026';
+      loadImage_(f).then(function(img){
+        for (var i = 0; i < ATTEMPTS.length; i++){
+          var text = null;
+          try { text = tryDecode_(img, ATTEMPTS[i][0], ATTEMPTS[i][1]); } catch(e){}
+          if (text){
+            err.textContent = '';
+            lastCode = ''; busy = false;
+            send(text);
+            return;
+          }
+        }
+        err.textContent = 'No QR found in that photo. Move closer so the code fills '
+                        + 'most of the frame, hold the phone flat, and keep it steady.';
+      }).catch(function(){
+        err.textContent = 'Could not open that photo. Try again.';
+      });
     });
   }
 
   function startCamera(){
-    scanner = new Html5Qrcode('reader', { verbose:false });
-    scanner.start(
-      { facingMode: 'environment' },
-      { fps: 12, qrbox: { width: 240, height: 240 } },
-      onScan,
-      function(){}
-    ).catch(function(){
-      document.getElementById('hint').textContent =
-        'Live camera blocked on this phone — use "Take photo of pass" below.';
-    });
+    /* A 404 on the library throws a ReferenceError here, and that throw is
+       OUTSIDE the .catch() below — it would abort the rest of this file at top
+       level, so initSignIn() never runs and the volunteer gets a dead page
+       instead of the working photo fallback. */
+    if (typeof Html5Qrcode === 'undefined'){
+      HINT_STICKY = 'Camera library did not load — use "Take photo of pass" below.';
+      paintHint();
+      return;
+    }
+    try {
+      scanner = new Html5Qrcode('reader', { verbose:false });
+      scanner.start(
+        { facingMode: 'environment' },
+        { fps: 12, qrbox: { width: 240, height: 240 } },
+        onScan,
+        function(){}
+      ).then(function(){
+        // Live again: clear any earlier failure message rather than leaving a
+        // stale "camera blocked" line above a working preview.
+        HINT_STICKY = '';
+        paintHint();
+      }).catch(function(){
+        HINT_STICKY = 'Live camera blocked on this phone — use "Take photo of pass" below.';
+        paintHint();
+      });
+    } catch (e) {
+      scanner = null;
+      HINT_STICKY = 'Camera unavailable — use "Take photo of pass" below.';
+      paintHint();
+    }
   }
 
-  var CLIENT_ID = <?!= JSON.stringify(clientId) ?>;
-  var NONCE = '', ROLE = '';
+  var SESSION_KEY = '';
 
-  function saveSession(key, name, nonce, role){
+  /* ts is passed through on restore so the client clock stays anchored to the
+     ORIGINAL sign-in. Rewriting it on every page load let the client's 5.5h
+     window drift arbitrarily past the server's fixed 6h session cache: reload at
+     hour five and the phone believed it was good until hour ten, then burned a
+     scan discovering otherwise at the gate. */
+  function saveSession(key, name, nonce, role, ts){
+    SESSION_KEY = key;
     VOLKEY = key;
     NONCE = nonce || NONCE;
     ROLE = role || '';
     try {
       sessionStorage.setItem('gatescanner_session', JSON.stringify(
-        { key: key, name: name, nonce: NONCE, role: ROLE, ts: Date.now() }));
+        { key: key, name: name, nonce: NONCE, role: ROLE, ts: ts || Date.now() }));
     } catch(e){}
     applyRole();
     document.getElementById('vol').textContent = name;
@@ -461,11 +720,13 @@
   }
 
   function clearSession(){
-    VOLKEY = ''; NONCE = ''; ROLE = '';
+    SESSION_KEY = ''; VOLKEY = ''; NONCE = ''; ROLE = '';
     applyRole();
     try { sessionStorage.removeItem('gatescanner_session'); } catch(e){}
     document.getElementById('signout').style.display = 'none';
   }
+
+  var signInReady = false;
 
   function applyRole(){
     var box = document.getElementById('manualBox');
@@ -492,39 +753,41 @@
     var wait = document.getElementById('signinWait');
     if (wait) wait.style.display = 'block';
     document.getElementById('signinErr').textContent = '';
-    google.script.run
-      .withSuccessHandler(function(res){
-        if (res.status === 'SIGNED_IN'){
-          saveSession(res.sessionKey, res.name, res.nonce, res.role);
-          document.getElementById('signin').className = '';
-          releaseScanner();
-        } else {
-          document.getElementById('signinErr').textContent =
-            (res.headline || 'Sign-in failed') + (res.detail ? ' — ' + res.detail : '');
-        }
-      })
-      .withFailureHandler(function(e){
-        document.getElementById('signinErr').textContent = 'Sign-in error: ' + e.message;
-      })
-      .apiSignIn(resp.credential);   // NOT handleSignIn_ — a trailing "_" is never exposed
+    api({ api: 'signin', idt: resp.credential }, function(res){
+      if (res.status === 'SIGNED_IN'){
+        saveSession(res.sessionKey, res.name, res.nonce, res.role);
+        document.getElementById('signin').className = '';
+        releaseScanner();        // a scan attempted before sign-in left it paused
+      } else {
+        document.getElementById('signinErr').textContent =
+          (res.headline || 'Sign-in failed') + (res.detail ? ' — ' + res.detail : '');
+        var gb2 = document.getElementById('gbtn');
+        if (gb2) gb2.style.display = '';
+        var w2 = document.getElementById('signinWait');
+        if (w2) w2.style.display = 'none';
+      }
+    }, 60000);   // sign-in is the slow path: measured over 20s, allow generous headroom
   }
-
-  var signInReady = false;
 
   function initSignIn(){
     var box = document.getElementById('signin');
-    if (!CLIENT_ID){ box.className = ''; return; }
+    if (!CLIENT_ID){
+      box.className = '';   // no Client ID configured: sign-in disabled, fall back to key mode
+      return;
+    }
     if (signInReady){ resetSignInUi(); box.className = 'show'; return; }   // already set up: just reopen it
 
     var saved = null;
     try { saved = JSON.parse(sessionStorage.getItem('gatescanner_session') || 'null'); } catch(e){}
     var restored = !!(saved && saved.key && saved.nonce &&
                       (Date.now() - saved.ts) < 5.5 * 3600 * 1000);
-    if (restored) saveSession(saved.key, saved.name, saved.nonce, saved.role);
+    if (restored) saveSession(saved.key, saved.name, saved.nonce, saved.role, saved.ts);
 
     // Show the overlay only if there is no session — but load Google's script
     // EITHER WAY. Returning early on a restored session left #gbtn empty, so
-    // tapping "Switch" later gave a sign-in screen with no button on it.
+    // tapping "Switch" later produced a sign-in screen with no button on it and
+    // no way forward short of reloading the page. Handing the phone to the next
+    // volunteer is precisely when Switch gets used.
     box.className = restored ? '' : 'show';
 
     var s = document.createElement('script');
@@ -544,21 +807,40 @@
     document.head.appendChild(s);
   }
 
-  setMode('IN');
-  startCamera();          // starts immediately; does not wait on sign-in
+
+  /* ------------------------------------------------------------------
+     Event wiring. These were inline on* attributes; moving them out is what
+     lets the CSP drop 'unsafe-inline', so an injected <" + "script> would be
+     refused by the browser even if something slipped past input validation.
+     ------------------------------------------------------------------ */
+  function on(id, evt, fn){
+    var el = document.getElementById(id);
+    if (el) el.addEventListener(evt, fn);
+  }
+  on('m-IN',     'click',  function(){ setMode('IN'); });
+  on('m-OUT',    'click',  function(){ setMode('OUT'); });
+  on('m-CHECK',  'click',  function(){ setMode('CHECK'); });
+  on('signout',  'click',  signOut);
+  on('manualGo', 'click',  sendManual);
+  on('result',   'click',  dismiss);
+  on('photoIn',  'change', function(){ scanPhoto(this); });
+  on('photoBtn', 'click',  function(){ document.getElementById('photoIn').click(); });
+
+  /* Restore the mode chosen before the reload. Validated, because
+     sessionStorage is editable and MODE is sent straight to the server. */
+  var savedMode = '';
+  try { savedMode = sessionStorage.getItem('gatescanner_mode') || ''; } catch(e){}
+  setMode(/^(IN|OUT|CHECK)$/.test(savedMode) ? savedMode : 'IN');
+  startCamera();          // starts right away, does not wait on sign-in
   try {
     initSignIn();
   } catch (e) {
     document.getElementById('signinErr').textContent = 'Sign-in setup error: ' + e.message;
   }
   if (!CLIENT_ID) {
-    // Key mode only: with sign-in configured, the key path is not a credential.
-    document.getElementById('vol').textContent = VOLKEY ? 'Key ' + VOLKEY.substring(0, 4) : 'no key';
+    document.getElementById('vol').textContent = VOLKEY ? 'Key ' + VOLKEY.substring(0,4) : 'no key';
     if (!VOLKEY) {
-      show({ status: 'DENIED', headline: 'Missing your volunteer key',
-             detail: 'Open the scanner link your coordinator sent you.' });
+      show({ status:'DENIED', headline:'Missing your volunteer key',
+             detail:'Open the personal scanner link your coordinator sent you.' });
     }
   }
-</script>
-</body>
-</html>
