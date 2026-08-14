@@ -524,6 +524,7 @@
   /* Set when the page was hidden while a result was on screen, so the camera
      could not be restarted at that moment. dismiss() picks it up. */
   var needsRestart = false;
+  var camRetried = false;   // one automatic retry per restart attempt
 
   /* A full stop-and-start, NOT resume().
 
@@ -535,11 +536,30 @@
      frame it was meant to prevent. A dead track can only be replaced. */
   function restartCamera_(){
     resumeAt = Date.now();
-    if (!scanner) { startCamera(); return; }
+    if (!scanner) { freshStart_(); return; }
     var old = scanner;
     scanner = null;                 // stop onScan firing during the gap
-    var again = function(){ startCamera(); };
-    try { old.stop().then(again, again); } catch(e){ again(); }
+
+    var started = false;
+    var go = function(){ if (started) return; started = true; freshStart_(); };
+
+    /* stop() can hang forever when the track is already dead — the promise
+       simply never settles, so neither handler fires and startCamera() is never
+       reached. Observed after a two-minute screen-off: the old instance's
+       "Scanner paused" overlay stayed on screen and only a page refresh cleared
+       it. Never wait on it indefinitely. */
+    try { old.stop().then(go, go); } catch(e){ go(); }
+    setTimeout(go, 1200);
+  }
+
+  /* Wipe the container before building a new scanner in it.
+     A hung stop() leaves the old video element and the library's paused overlay
+     behind; a fresh instance on top of that debris shows stale chrome over a
+     working camera, or fails outright. */
+  function freshStart_(){
+    var el = document.getElementById('reader');
+    if (el) { try { el.innerHTML = ''; } catch(e){} }
+    startCamera();
   }
 
   function resumeScanner_(){
@@ -685,9 +705,20 @@
       ).then(function(){
         // Live again: clear any earlier failure message rather than leaving a
         // stale "camera blocked" line above a working preview.
+        camRetried = false;
         HINT_STICKY = '';
         paintHint();
       }).catch(function(){
+        /* Straight after a long sleep the OS may not have released the camera
+           yet, so the first attempt can fail on timing alone. Try once more
+           before telling the volunteer it is blocked — a wrong "camera blocked"
+           message sends them to the photo fallback they did not need. */
+        if (!camRetried) {
+          camRetried = true;
+          setTimeout(function(){ scanner = null; freshStart_(); }, 900);
+          return;
+        }
+        camRetried = false;
         HINT_STICKY = 'Live camera blocked on this phone — use "Take photo of pass" below.';
         paintHint();
       });
